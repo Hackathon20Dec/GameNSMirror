@@ -1,28 +1,35 @@
-import Phaser from 'phaser';
-import { GAME_WIDTH, GAME_HEIGHT } from './config/constants';
-import { BootScene } from './scenes/BootScene';
-import { TitleScene } from './scenes/TitleScene';
-import { GameScene } from './scenes/GameScene';
+import Phaser from "phaser";
+import "./style.css";
+import GameScene from "./scenes/GameScene";
 
 const config: Phaser.Types.Core.GameConfig = {
-  type: Phaser.AUTO,
-  width: GAME_WIDTH,
-  height: GAME_HEIGHT,
-  parent: 'game-container',
-  backgroundColor: '#2d5a27',
-  pixelArt: true,
-  physics: {
-    default: 'arcade',
-    arcade: {
-      gravity: { x: 0, y: 0 },
-      debug: false,
+    type: Phaser.AUTO,
+    parent: "app",
+    backgroundColor: "#0f0f10",
+    scale: {
+        mode: Phaser.Scale.RESIZE,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: window.innerWidth,
+        height: window.innerHeight,
     },
-  },
-  scene: [BootScene, TitleScene, GameScene],
-  scale: {
-    mode: Phaser.Scale.FIT,
-    autoCenter: Phaser.Scale.CENTER_BOTH,
-  },
+    physics: {
+        default: "arcade",
+        arcade: {
+            gravity: { y: 0, x: 0 },
+            debug: false,
+        },
+    },
+    scene: [GameScene],
+    pixelArt: true,
+    render: {
+        antialias: false,
+    },
 };
 
-new Phaser.Game(config);
+const game = new Phaser.Game(config);
+
+// With RESIZE mode, Phaser handles most of this, but keeping a resize hook is harmless
+// and ensures the canvas matches the container on every browser.
+window.addEventListener("resize", () => {
+    game.scale.resize(window.innerWidth, window.innerHeight);
+});
