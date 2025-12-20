@@ -7,5 +7,6 @@ creating stardew valley
 - [ ] **Backend + DB:** auth + user data (NS username, join date, sign-in provider) + profile metadata (links/about).
     - express backend and how to host multiple players, need fly.io deployment
 - [ ] **Avatars:** use a real sprite sheet (or existing one); for early MVP, assign a random avatar from a fixed set (no custom creator yet).
+- [ ] **Social UI:** users clickable → profile view; small header UI for a timeline of NS people; "bookface" directory-style view.
 
-<!-- Down the line -->- [ ] **Social UI:** users clickable → profile view; small header UI for a timeline of NS people; "bookface" directory-style view.
+<!-- Down the line -->
