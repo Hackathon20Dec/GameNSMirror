@@ -14,6 +14,7 @@ import WorldChunkBuilder, {
 } from "./builders/WorldChunkBuilder";
 import ChunkManager from "./systems/ChunkManager";
 import UnitStripManager from "./systems/UnitStripManager";
+import MiniMapOverlay from "./systems/MiniMapOverlay";
 import {
     ANIM_PLAYER_ATTACK1,
     ANIM_PLAYER_ATTACK2,
@@ -41,6 +42,12 @@ const SPRITESHEET_URL = new URL(
     import.meta.url
 ).toString();
 
+const MINIMAP_KEY = "mini_map";
+const MINIMAP_URL = new URL(
+    "../../sprites/mini_map.png",
+    import.meta.url
+).toString();
+
 export default class GameScene extends Phaser.Scene {
     private generator!: WorldGenerator;
 
@@ -56,6 +63,7 @@ export default class GameScene extends Phaser.Scene {
     private keyShift!: Phaser.Input.Keyboard.Key;
 
     private hud!: Phaser.GameObjects.Text;
+    private miniMapOverlay!: MiniMapOverlay;
 
     private chunkManager!: ChunkManager;
     private chunkBuilder!: WorldChunkBuilder;
@@ -84,6 +92,9 @@ export default class GameScene extends Phaser.Scene {
             frameWidth: SPRITESHEET_FRAME_SIZE,
             frameHeight: SPRITESHEET_FRAME_SIZE,
         });
+
+        // Mini-map image
+        this.load.image(MINIMAP_KEY, MINIMAP_URL);
 
         // --- Tiny Swords unit idle sheets (for NPCs + player idle) ---
         for (const c of UNIT_COLORS) {
@@ -119,6 +130,13 @@ export default class GameScene extends Phaser.Scene {
         if (this.textures.exists(SPRITESHEET_KEY)) {
             this.textures
                 .get(SPRITESHEET_KEY)
+                .setFilter(Phaser.Textures.FilterMode.NEAREST);
+        }
+
+        // Mini-map: crisp pixels
+        if (this.textures.exists(MINIMAP_KEY)) {
+            this.textures
+                .get(MINIMAP_KEY)
                 .setFilter(Phaser.Textures.FilterMode.NEAREST);
         }
 
@@ -250,6 +268,18 @@ export default class GameScene extends Phaser.Scene {
             })
             .setScrollFactor(0)
             .setDepth(1000);
+
+        // Mini-map UI (bottom-left; click to expand/center)
+        this.miniMapOverlay = new MiniMapOverlay(this, {
+            textureKey: MINIMAP_KEY,
+            pois: [
+                { id: "coworking", name: "Coworking", u: 0.54, v: 0.32 },
+                { id: "cafe", name: "Cafe", u: 0.65 , v: 0.60 },
+                { id: "gym", name: "Gym", u: 0.64, v: 0.70 },
+                { id: "13th_floor", name: "13th floor", u: 0.67, v: 0.55 },
+            ],
+        });
+        this.miniMapOverlay.mount();
 
         // Chunk builder + streaming manager
         this.chunkBuilder = new WorldChunkBuilder({
