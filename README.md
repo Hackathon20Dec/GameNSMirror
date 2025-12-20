@@ -1,8 +1,13 @@
-# GameNSMirror (Farm Life prototype)
+# AIRPG Phaser Frontend (src/)
 
-A small **Phaser 3 + TypeScript + Vite** web game prototype. Right now it’s a simple single-player scene flow:
-- Boot → Title (pick gender + name) → Game (top-down movement on a basic map)
-- If sprite/tile assets are missing, the game generates simple procedural fallback art.
+This repo now contains a **single-scene Phaser 3 + TypeScript + Vite** frontend that matches the AIRPG spec:
+- Deterministic procedural terrain (`src/world/WorldGenerator.ts`)
+- 3×3 chunk streaming with time-sliced load/unload (`src/scenes/systems/ChunkManager.ts`)
+- Chunk building (tile layers + settlements + nature + NPCs) (`src/scenes/builders/WorldChunkBuilder.ts`)
+- Tiny Swords unit strip slicing + animation registration (`src/scenes/systems/UnitStripManager.ts`)
+
+> Note: The runtime expects a world spritesheet at `sprites/spritesheet.png` (frame size 64×64).
+> Tiny Swords assets are loaded from the `Tiny Swords/` directory already in the repo.
 
 ## Run locally
 
@@ -16,8 +21,6 @@ npm install
 npm run dev
 ````
 
-Vite will open the site (or show a local URL in the terminal).
-
 ### Build & preview
 
 ```bash
@@ -27,34 +30,18 @@ npm run preview
 
 ## Controls
 
-* Move: **WASD** or **Arrow Keys**
+* Move: **WASD**
+* Guard: **Shift** (blocks movement)
+* Attack 1: **Q** (locks until anim completes)
+* Attack 2: **E** (locks until anim completes)
 
-## Where the code lives
+## Key files
 
-* `src/main.ts` — Phaser game config + scene list
-* `src/scenes/BootScene.ts` — loading + procedural fallback textures + animations
-* `src/scenes/TitleScene.ts` — character selection + name entry
-* `src/scenes/GameScene.ts` — tilemap + player spawn + camera follow
-* `src/entities/Player.ts` — movement + animation switching
-* `src/config/constants.ts` — sizes, speeds, scene keys
-
-## Assets (optional right now)
-
-The boot scene attempts to load:
-
-* `assets/sprites/player_male.png`
-* `assets/sprites/player_female.png`
-* `assets/tiles/tileset.png`
-
-If those files aren’t present, it will still run using procedural textures.
-
-## Roadmap / Endgame (high-level)
-
-- [ ] **Maps / Areas (FC):** show different areas (cafe/lobby, coworking floors, 13th floor partial, gym) and move between them.
-- [ ] **Backend + DB:** auth + user data (NS username, join date, sign-in provider) + profile metadata (links/about).
-- [ ] **Avatars:** use a real sprite sheet (or existing one); for early MVP, assign a random avatar from a fixed set (no custom creator yet).
-- [ ] **World interactions:** richer map with points/entries (Stardew / Pokémon vibe) using Phaser.
-- [ ] **GPT NPCs:** scheduled NPC behavior (early MVP: scripted schedules + "seemingly random" movement). NPCs: balaji, jackson, yash, otavio.
-- [ ] **Social UI:** users clickable → profile view; small header UI for a timeline of NS people; "bookface" directory-style view.
-
----
+* `src/main.ts` — Phaser game config (RESIZE scaling) + window resize hook
+* `src/scenes/GameScene.ts` — main loop: input, state machine, collision, chunk streaming, HUD
+* `src/world/WorldGenerator.ts` — terrain signals + determinism helpers + entity definitions
+* `src/scenes/builders/WorldChunkBuilder.ts` — builds tilemap layers + placements + NPC sprites
+* `src/scenes/systems/ChunkManager.ts` — 3×3 active window streaming with time budgets
+* `src/scenes/systems/UnitStripManager.ts` — strip-to-frames + animation creation
+* `src/scenes/tinySwords.ts` — asset URL helpers + standardized keys
+* `src/tileset/*` — tileset manifest helpers (not used by the runtime scene currently)

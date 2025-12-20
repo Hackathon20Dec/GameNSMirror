@@ -1,248 +1,535 @@
-import Phaser from 'phaser';
-import { SCENES, TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, GAME_WIDTH } from '../config/constants';
-import { Player } from '../entities/Player';
-import { PlayerData } from '../types';
+import Phaser from "phaser";
+import {
+    CHUNK_SIZE_PX,
+    EMOJI_FONT_FAMILY,
+    HALF_CHUNK_SIZE_PX,
+    PLAYER_SPEED_PX_PER_SEC,
+    SPRITESHEET_FRAME_SIZE,
+    SPRITESHEET_SCALE,
+    TILE_SIZE,
+} from "../constants";
+import WorldGenerator, { TerrainType } from "../world/WorldGenerator";
+import WorldChunkBuilder, {
+    NpcIdleVariant,
+} from "./builders/WorldChunkBuilder";
+import ChunkManager from "./systems/ChunkManager";
+import UnitStripManager from "./systems/UnitStripManager";
+import {
+    ANIM_PLAYER_ATTACK1,
+    ANIM_PLAYER_ATTACK2,
+    ANIM_PLAYER_GUARD,
+    ANIM_PLAYER_IDLE,
+    ANIM_PLAYER_RUN,
+    NPC_UNIT_TYPES,
+    PLAYER_COLOR_ID,
+    TEX_PLAYER_ATTACK1,
+    TEX_PLAYER_ATTACK2,
+    TEX_PLAYER_GUARD,
+    TEX_PLAYER_IDLE,
+    TEX_PLAYER_RUN,
+    UNIT_COLORS,
+    assetUrl,
+    npcIdleAnimKey,
+    unitIdleTextureKey,
+} from "./tinySwords";
 
-export class GameScene extends Phaser.Scene {
-  private player!: Player;
-  private map!: Phaser.Tilemaps.Tilemap;
-  private groundLayer!: Phaser.Tilemaps.TilemapLayer;
-  private obstaclesLayer!: Phaser.Tilemaps.TilemapLayer;
+type PlayerAnimState = "idle" | "run" | "attack1" | "attack2" | "guard";
 
-  constructor() {
-    super({ key: SCENES.GAME });
-  }
+const SPRITESHEET_KEY = "world_sheet";
+const SPRITESHEET_URL = new URL(
+    "../../sprites/spritesheet.png",
+    import.meta.url
+).toString();
 
-  init(data: { player: PlayerData }): void {
-    this.data.set('playerData', data.player);
-  }
+export default class GameScene extends Phaser.Scene {
+    private generator!: WorldGenerator;
 
-  create(): void {
-    const playerData = this.data.get('playerData') as PlayerData;
+    private player!: Phaser.GameObjects.Sprite;
 
-    // Create tilemap
-    this.createMap();
+    private keyW!: Phaser.Input.Keyboard.Key;
+    private keyA!: Phaser.Input.Keyboard.Key;
+    private keyS!: Phaser.Input.Keyboard.Key;
+    private keyD!: Phaser.Input.Keyboard.Key;
 
-    // Create player at center of map
-    const startX = (MAP_WIDTH * TILE_SIZE) / 2;
-    const startY = (MAP_HEIGHT * TILE_SIZE) / 2;
-    this.player = new Player(this, startX, startY, playerData.name, playerData.gender);
+    private keyQ!: Phaser.Input.Keyboard.Key;
+    private keyE!: Phaser.Input.Keyboard.Key;
+    private keyShift!: Phaser.Input.Keyboard.Key;
 
-    // Set up collision with obstacles
-    if (this.obstaclesLayer) {
-      this.physics.add.collider(this.player, this.obstaclesLayer);
+    private hud!: Phaser.GameObjects.Text;
+
+    private chunkManager!: ChunkManager;
+    private chunkBuilder!: WorldChunkBuilder;
+
+    private unitStrips!: UnitStripManager;
+    private npcIdleVariants: NpcIdleVariant[] = [];
+
+    // Small per-frame budget to keep the game responsive
+    private readonly chunkWorkBudgetMs = 6;
+
+    // Movement blocked hint
+    private blockedHintUntilMs = 0;
+    private blockedHintText = "";
+
+    // Player anim state
+    private playerState: PlayerAnimState = "idle";
+    private playerFacingX: 1 | -1 = 1; // default facing right
+    private playerActionLocked = false;
+
+    constructor() {
+        super({ key: "GameScene" });
     }
 
-    // Set up camera
-    this.cameras.main.startFollow(this.player, true, 0.08, 0.08);
-    this.cameras.main.setBounds(0, 0, MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE);
-    this.physics.world.setBounds(0, 0, MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE);
+    preload(): void {
+        this.load.spritesheet(SPRITESHEET_KEY, SPRITESHEET_URL, {
+            frameWidth: SPRITESHEET_FRAME_SIZE,
+            frameHeight: SPRITESHEET_FRAME_SIZE,
+        });
 
-    // Add player name tag
-    this.createNameTag(playerData.name);
+        // --- Tiny Swords unit idle sheets (for NPCs + player idle) ---
+        for (const c of UNIT_COLORS) {
+            for (const u of NPC_UNIT_TYPES) {
+                const key = unitIdleTextureKey(c.id, u.id);
+                const rel = `../../Tiny Swords/Units/${c.folder}/${u.folder}/${u.idleFile}`;
+                this.load.image(key, assetUrl(rel));
+            }
+        }
 
-    // Display welcome message
-    this.showWelcomeMessage(playerData.name);
-  }
+        // --- Player-specific warrior actions (run/attack/guard) ---
+        const playerColorFolder =
+            UNIT_COLORS.find((c) => c.id === PLAYER_COLOR_ID)?.folder ?? "Blue Units";
+        const warriorBase = `../../Tiny Swords/Units/${playerColorFolder}/Warrior/`;
 
-  private createMap(): void {
-    // Create a blank tilemap
-    this.map = this.make.tilemap({
-      tileWidth: TILE_SIZE,
-      tileHeight: TILE_SIZE,
-      width: MAP_WIDTH,
-      height: MAP_HEIGHT,
-    });
-
-    // Add tileset
-    const tileset = this.map.addTilesetImage('tiles', 'tiles', TILE_SIZE, TILE_SIZE, 0, 0);
-
-    if (!tileset) {
-      // Fallback: create procedural ground
-      this.createProceduralMap();
-      return;
+        this.load.image(TEX_PLAYER_RUN, assetUrl(`${warriorBase}Warrior_Run.png`));
+        this.load.image(
+            TEX_PLAYER_ATTACK1,
+            assetUrl(`${warriorBase}Warrior_Attack1.png`)
+        );
+        this.load.image(
+            TEX_PLAYER_ATTACK2,
+            assetUrl(`${warriorBase}Warrior_Attack2.png`)
+        );
+        this.load.image(
+            TEX_PLAYER_GUARD,
+            assetUrl(`${warriorBase}Warrior_Guard.png`)
+        );
     }
 
-    // Create ground layer
-    this.groundLayer = this.map.createBlankLayer('ground', tileset, 0, 0)!;
+    create(): void {
+        // Ensure crisp pixels even when scaled (world spritesheet)
+        if (this.textures.exists(SPRITESHEET_KEY)) {
+            this.textures
+                .get(SPRITESHEET_KEY)
+                .setFilter(Phaser.Textures.FilterMode.NEAREST);
+        }
 
-    // Fill with grass
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      for (let x = 0; x < MAP_WIDTH; x++) {
-        // Use tile index 0 for grass (or vary for visual interest)
-        const tileIndex = Math.random() > 0.9 ? 1 : 0;
-        this.groundLayer.putTileAt(tileIndex, x, y);
-      }
+        // Generator seed (deterministic world)
+        this.generator = new WorldGenerator("Seed42");
+
+        // Unit strip helper (Tiny Swords)
+        this.unitStrips = new UnitStripManager(this);
+
+        // Ensure crisp pixels for unit textures
+        for (const c of UNIT_COLORS) {
+            for (const u of NPC_UNIT_TYPES) {
+                this.unitStrips.setNearestFilterForTexture(
+                    unitIdleTextureKey(c.id, u.id)
+                );
+            }
+        }
+        this.unitStrips.setNearestFilterForTexture(TEX_PLAYER_RUN);
+        this.unitStrips.setNearestFilterForTexture(TEX_PLAYER_ATTACK1);
+        this.unitStrips.setNearestFilterForTexture(TEX_PLAYER_ATTACK2);
+        this.unitStrips.setNearestFilterForTexture(TEX_PLAYER_GUARD);
+
+        // --- Register unit strip frames + animations ---
+        // Player animations
+        this.unitStrips.ensureStripAnimation(
+            ANIM_PLAYER_IDLE,
+            TEX_PLAYER_IDLE,
+            6,
+            -1
+        );
+        this.unitStrips.ensureStripAnimation(
+            ANIM_PLAYER_RUN,
+            TEX_PLAYER_RUN,
+            10,
+            -1
+        );
+        this.unitStrips.ensureStripAnimation(
+            ANIM_PLAYER_GUARD,
+            TEX_PLAYER_GUARD,
+            8,
+            -1
+        );
+        this.unitStrips.ensureStripAnimation(
+            ANIM_PLAYER_ATTACK1,
+            TEX_PLAYER_ATTACK1,
+            12,
+            0
+        );
+        this.unitStrips.ensureStripAnimation(
+            ANIM_PLAYER_ATTACK2,
+            TEX_PLAYER_ATTACK2,
+            12,
+            0
+        );
+
+        // NPC idle animations (any unit, any color)
+        this.npcIdleVariants = [];
+        for (const c of UNIT_COLORS) {
+            for (const u of NPC_UNIT_TYPES) {
+                const texKey = unitIdleTextureKey(c.id, u.id);
+                const animKey = npcIdleAnimKey(c.id, u.id);
+
+                this.unitStrips.ensureStripAnimation(animKey, texKey, 6, -1);
+
+                if (this.textures.exists(texKey)) {
+                    this.npcIdleVariants.push({
+                        id: `${c.id}_${u.id}`,
+                        textureKey: texKey,
+                        animKey,
+                    });
+                }
+            }
+        }
+
+        // Player sprite: Tiny Swords Warrior
+        this.unitStrips.ensureStripFrames(TEX_PLAYER_IDLE);
+        const playerScale = 0.4;
+
+        this.player = this.add
+            .sprite(0, 0, TEX_PLAYER_IDLE, "f0")
+            .setScale(playerScale)
+            .setOrigin(0.5, 0.85) // foot-ish anchor for top-down movement feel
+            .setDepth(2);
+
+        this.player.setFlipX(false); // default right
+        this.player.play(ANIM_PLAYER_IDLE, true);
+
+        // Ensure the player starts on walkable land (important now that WATER is solid).
+        this.placePlayerAtSafeSpawn();
+
+        // When attack animation finishes, return to guard/run/idle depending on input
+        this.player.on(
+            Phaser.Animations.Events.ANIMATION_COMPLETE,
+            (anim: Phaser.Animations.Animation) => {
+                if (
+                    anim.key === ANIM_PLAYER_ATTACK1 ||
+                    anim.key === ANIM_PLAYER_ATTACK2
+                ) {
+                    this.playerActionLocked = false;
+                    this.refreshPlayerLocomotionAnimation();
+                }
+            }
+        );
+
+        // Camera follow
+        this.cameras.main.startFollow(this.player);
+        this.cameras.main.setRoundPixels(true);
+
+        // WASD + action keys
+        if (!this.input.keyboard) {
+            throw new Error("Keyboard input is not available.");
+        }
+        this.keyW = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W);
+        this.keyA = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A);
+        this.keyS = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S);
+        this.keyD = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D);
+
+        this.keyQ = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
+        this.keyE = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
+        this.keyShift = this.input.keyboard.addKey(
+            Phaser.Input.Keyboard.KeyCodes.SHIFT
+        );
+
+        // HUD
+        this.hud = this.add
+            .text(10, 10, "", {
+                fontFamily: EMOJI_FONT_FAMILY,
+                fontSize: "14px",
+            })
+            .setScrollFactor(0)
+            .setDepth(1000);
+
+        // Chunk builder + streaming manager
+        this.chunkBuilder = new WorldChunkBuilder({
+            scene: this,
+            generator: this.generator,
+            worldTextureKey: SPRITESHEET_KEY,
+            unitStrips: this.unitStrips,
+            npcIdleVariants: this.npcIdleVariants,
+        });
+
+        this.chunkManager = new ChunkManager(
+            this,
+            { chunkSizePx: CHUNK_SIZE_PX, halfChunkSizePx: HALF_CHUNK_SIZE_PX },
+            (cx, cy) => this.chunkBuilder.buildChunkObjects(cx, cy)
+        );
+
+        // Initial chunk planning + initial work
+        this.chunkManager.refresh(this.player.x, this.player.y, true);
+        this.chunkManager.processQueues(24);
+
+        this.refreshHud();
     }
 
-    // Create obstacles layer
-    this.obstaclesLayer = this.map.createBlankLayer('obstacles', tileset, 0, 0)!;
+    update(_time: number, delta: number): void {
+        const dt = delta / 1000;
 
-    // Add some random obstacles (trees, rocks)
-    this.addObstacles();
-  }
+        let moveX = 0;
+        let moveY = 0;
 
-  private createProceduralMap(): void {
-    // Create colored rectangle tiles as fallback
-    const graphics = this.add.graphics();
+        if (this.keyW.isDown) moveY -= 1;
+        if (this.keyS.isDown) moveY += 1;
+        if (this.keyA.isDown) moveX -= 1;
+        if (this.keyD.isDown) moveX += 1;
 
-    // Draw grass background
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      for (let x = 0; x < MAP_WIDTH; x++) {
-        const shade = 0.9 + Math.random() * 0.2;
-        const green = Math.floor(90 * shade);
-        const color = Phaser.Display.Color.GetColor(45, green + 50, 39);
-        graphics.fillStyle(color);
-        graphics.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
-      }
+        // Facing (left/right flip). Default right, keep last when moving only vertically.
+        if (moveX !== 0) {
+            this.playerFacingX = moveX > 0 ? 1 : -1;
+        }
+        this.player.setFlipX(this.playerFacingX < 0);
+
+        const wantGuard = this.keyShift.isDown;
+        const wantAttack1 = Phaser.Input.Keyboard.JustDown(this.keyQ);
+        const wantAttack2 = Phaser.Input.Keyboard.JustDown(this.keyE);
+
+        // Actions
+        if (!this.playerActionLocked) {
+            if (wantAttack1) {
+                this.startPlayerAttack("attack1");
+            } else if (wantAttack2) {
+                this.startPlayerAttack("attack2");
+            } else {
+                // Locomotion/guard state selection
+                if (wantGuard) {
+                    this.applyPlayerState("guard");
+                } else if (moveX !== 0 || moveY !== 0) {
+                    this.applyPlayerState("run");
+                } else {
+                    this.applyPlayerState("idle");
+                }
+            }
+        }
+
+        // Movement is blocked while guarding or during attacks
+        const allowMove = !this.playerActionLocked && !wantGuard;
+
+        if (allowMove) {
+            const len = Math.hypot(moveX, moveY);
+            if (len > 0) {
+                moveX /= len;
+                moveY /= len;
+
+                const dx = moveX * PLAYER_SPEED_PX_PER_SEC * dt;
+                const dy = moveY * PLAYER_SPEED_PX_PER_SEC * dt;
+
+                this.tryMoveWithCollision(dx, dy);
+            }
+        }
+
+        // 9-chunk window around player
+        this.chunkManager.refresh(this.player.x, this.player.y, false);
+
+        // Time-sliced chunk work
+        this.chunkManager.processQueues(this.chunkWorkBudgetMs);
+
+        this.refreshHud();
     }
 
-    // Add obstacle rectangles
-    const obstacleGroup = this.physics.add.staticGroup();
+    // -----------------------------
+    // Spawn safety (avoid starting on WATER)
+    // -----------------------------
 
-    // Add trees (dark green circles)
-    for (let i = 0; i < 30; i++) {
-      const x = Phaser.Math.Between(2, MAP_WIDTH - 3) * TILE_SIZE + TILE_SIZE / 2;
-      const y = Phaser.Math.Between(2, MAP_HEIGHT - 3) * TILE_SIZE + TILE_SIZE / 2;
+    private findNearestWalkableTile(
+        startTileX: number,
+        startTileY: number,
+        maxRadius: number
+    ): { tileX: number; tileY: number } {
+        if (!this.generator.isSolidAtTile(startTileX, startTileY)) {
+            return { tileX: startTileX, tileY: startTileY };
+        }
 
-      // Skip if too close to center (player spawn)
-      const centerX = (MAP_WIDTH * TILE_SIZE) / 2;
-      const centerY = (MAP_HEIGHT * TILE_SIZE) / 2;
-      if (Math.abs(x - centerX) < TILE_SIZE * 3 && Math.abs(y - centerY) < TILE_SIZE * 3) {
-        continue;
-      }
+        for (let r = 1; r <= maxRadius; r++) {
+            for (let dy = -r; dy <= r; dy++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    // ring only (not full square)
+                    if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
 
-      // Tree trunk
-      graphics.fillStyle(0x8B4513);
-      graphics.fillRect(x - 4, y, 8, 16);
+                    const tx = startTileX + dx;
+                    const ty = startTileY + dy;
 
-      // Tree foliage
-      graphics.fillStyle(0x228B22);
-      graphics.fillCircle(x, y - 8, 20);
+                    if (!this.generator.isSolidAtTile(tx, ty)) {
+                        return { tileX: tx, tileY: ty };
+                    }
+                }
+            }
+        }
 
-      // Add collision
-      const obstacle = obstacleGroup.create(x, y + 8, undefined) as Phaser.Physics.Arcade.Sprite;
-      obstacle.setVisible(false);
-      obstacle.body?.setSize(24, 16);
+        // Fallback: return original even if it's solid (better than NaN positions)
+        return { tileX: startTileX, tileY: startTileY };
     }
 
-    // Add rocks (gray)
-    for (let i = 0; i < 15; i++) {
-      const x = Phaser.Math.Between(2, MAP_WIDTH - 3) * TILE_SIZE + TILE_SIZE / 2;
-      const y = Phaser.Math.Between(2, MAP_HEIGHT - 3) * TILE_SIZE + TILE_SIZE / 2;
+    private placePlayerAtSafeSpawn(): void {
+        const startTileX = 0;
+        const startTileY = 0;
 
-      const centerX = (MAP_WIDTH * TILE_SIZE) / 2;
-      const centerY = (MAP_HEIGHT * TILE_SIZE) / 2;
-      if (Math.abs(x - centerX) < TILE_SIZE * 3 && Math.abs(y - centerY) < TILE_SIZE * 3) {
-        continue;
-      }
+        // Large enough to escape an unlucky ocean-at-origin seed without noticeable cost.
+        const maxRadiusTiles = 220;
 
-      graphics.fillStyle(0x808080);
-      graphics.fillEllipse(x, y, 24, 16);
-      graphics.fillStyle(0x696969);
-      graphics.fillEllipse(x - 2, y - 2, 20, 12);
+        const safe = this.findNearestWalkableTile(
+            startTileX,
+            startTileY,
+            maxRadiusTiles
+        );
 
-      const obstacle = obstacleGroup.create(x, y, undefined) as Phaser.Physics.Arcade.Sprite;
-      obstacle.setVisible(false);
-      obstacle.body?.setSize(24, 16);
+        this.player.setPosition(
+            (safe.tileX + 0.5) * TILE_SIZE,
+            (safe.tileY + 0.5) * TILE_SIZE
+        );
     }
 
-    // Add fence around the perimeter
-    graphics.fillStyle(0x8B4513);
-    for (let x = 0; x < MAP_WIDTH; x++) {
-      graphics.fillRect(x * TILE_SIZE, 0, TILE_SIZE, 8);
-      graphics.fillRect(x * TILE_SIZE, MAP_HEIGHT * TILE_SIZE - 8, TILE_SIZE, 8);
+    // -----------------------------
+    // Player animation state
+    // -----------------------------
 
-      const topFence = obstacleGroup.create(x * TILE_SIZE + TILE_SIZE / 2, 4, undefined) as Phaser.Physics.Arcade.Sprite;
-      topFence.setVisible(false);
-      topFence.body?.setSize(TILE_SIZE, 8);
+    private applyPlayerState(state: PlayerAnimState): void {
+        this.playerState = state;
 
-      const bottomFence = obstacleGroup.create(x * TILE_SIZE + TILE_SIZE / 2, MAP_HEIGHT * TILE_SIZE - 4, undefined) as Phaser.Physics.Arcade.Sprite;
-      bottomFence.setVisible(false);
-      bottomFence.body?.setSize(TILE_SIZE, 8);
-    }
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      graphics.fillRect(0, y * TILE_SIZE, 8, TILE_SIZE);
-      graphics.fillRect(MAP_WIDTH * TILE_SIZE - 8, y * TILE_SIZE, 8, TILE_SIZE);
+        let animKey = ANIM_PLAYER_IDLE;
 
-      const leftFence = obstacleGroup.create(4, y * TILE_SIZE + TILE_SIZE / 2, undefined) as Phaser.Physics.Arcade.Sprite;
-      leftFence.setVisible(false);
-      leftFence.body?.setSize(8, TILE_SIZE);
+        if (state === "run") animKey = ANIM_PLAYER_RUN;
+        else if (state === "guard") animKey = ANIM_PLAYER_GUARD;
+        else if (state === "attack1") animKey = ANIM_PLAYER_ATTACK1;
+        else if (state === "attack2") animKey = ANIM_PLAYER_ATTACK2;
 
-      const rightFence = obstacleGroup.create(MAP_WIDTH * TILE_SIZE - 4, y * TILE_SIZE + TILE_SIZE / 2, undefined) as Phaser.Physics.Arcade.Sprite;
-      rightFence.setVisible(false);
-      rightFence.body?.setSize(8, TILE_SIZE);
+        this.player.play(animKey, true);
     }
 
-    // Store for collision
-    this.physics.add.collider(this.player, obstacleGroup);
-  }
-
-  private addObstacles(): void {
-    // Add some trees and rocks
-    const treePositions = [
-      { x: 5, y: 5 }, { x: 10, y: 3 }, { x: 15, y: 8 },
-      { x: 25, y: 5 }, { x: 30, y: 10 }, { x: 8, y: 20 },
-      { x: 35, y: 25 }, { x: 5, y: 25 }, { x: 20, y: 28 },
-    ];
-
-    for (const pos of treePositions) {
-      const tile = this.obstaclesLayer.putTileAt(2, pos.x, pos.y);
-      if (tile) tile.setCollision(true);
+    private startPlayerAttack(which: "attack1" | "attack2"): void {
+        this.playerActionLocked = true;
+        this.applyPlayerState(which);
     }
 
-    this.obstaclesLayer.setCollisionByExclusion([-1]);
-  }
+    private refreshPlayerLocomotionAnimation(): void {
+        if (this.playerActionLocked) return;
 
-  private createNameTag(name: string): void {
-    const nameTag = this.add.text(0, -40, name, {
-      font: 'bold 14px Arial',
-      color: '#ffffff',
-      stroke: '#000000',
-      strokeThickness: 3,
-    });
-    nameTag.setOrigin(0.5);
+        const wantGuard = this.keyShift?.isDown ?? false;
 
-    // Make name tag follow player
-    this.events.on('update', () => {
-      nameTag.setPosition(this.player.x, this.player.y - 40);
-    });
-  }
+        const moving =
+            (this.keyW?.isDown ?? false) ||
+            (this.keyA?.isDown ?? false) ||
+            (this.keyS?.isDown ?? false) ||
+            (this.keyD?.isDown ?? false);
 
-  private showWelcomeMessage(name: string): void {
-    const welcomeText = this.add.text(GAME_WIDTH / 2, 50, `Welcome, ${name}!`, {
-      font: 'bold 24px Arial',
-      color: '#ffffff',
-      stroke: '#000000',
-      strokeThickness: 4,
-    });
-    welcomeText.setOrigin(0.5);
-    welcomeText.setScrollFactor(0);
+        if (wantGuard) {
+            this.applyPlayerState("guard");
+        } else if (moving) {
+            this.applyPlayerState("run");
+        } else {
+            this.applyPlayerState("idle");
+        }
+    }
 
-    const controlsText = this.add.text(GAME_WIDTH / 2, 85, 'Use WASD or Arrow Keys to move', {
-      font: '16px Arial',
-      color: '#e0e0e0',
-      stroke: '#000000',
-      strokeThickness: 2,
-    });
-    controlsText.setOrigin(0.5);
-    controlsText.setScrollFactor(0);
+    // -----------------------------
+    // Player Collision (Water = ocean + rivers)
+    // -----------------------------
 
-    // Fade out after 3 seconds
-    this.time.delayedCall(3000, () => {
-      this.tweens.add({
-        targets: [welcomeText, controlsText],
-        alpha: 0,
-        duration: 1000,
-        onComplete: () => {
-          welcomeText.destroy();
-          controlsText.destroy();
-        },
-      });
-    });
-  }
+    private worldToTileCoord(worldPx: number): number {
+        return Math.floor(worldPx / TILE_SIZE);
+    }
 
-  update(): void {
-    this.player.update();
-  }
+    private worldToChunkCoord(worldPx: number): number {
+        return Math.floor((worldPx + HALF_CHUNK_SIZE_PX) / CHUNK_SIZE_PX);
+    }
+
+    private getTerrainAtWorld(
+        worldX: number,
+        worldY: number
+    ): {
+        tileX: number;
+        tileY: number;
+        terrainType: TerrainType;
+        solid: boolean;
+        river01: number;
+        forest01: number;
+    } {
+        const tileX = this.worldToTileCoord(worldX);
+        const tileY = this.worldToTileCoord(worldY);
+        const terrain = this.generator.getTerrainAtTile(tileX, tileY);
+        return {
+            tileX,
+            tileY,
+            terrainType: terrain.type,
+            solid: terrain.solid,
+            river01: terrain.river01,
+            forest01: terrain.forest01,
+        };
+    }
+
+    private setBlockedHint(terrainType: TerrainType): void {
+        this.blockedHintText = `🚫 Blocked by ${terrainType}`;
+        this.blockedHintUntilMs = this.time.now + 900;
+    }
+
+    private tryMoveWithCollision(dx: number, dy: number): void {
+        if (dx !== 0) {
+            const nx = this.player.x + dx;
+            const check = this.getTerrainAtWorld(nx, this.player.y);
+
+            if (!check.solid) {
+                this.player.x = nx;
+            } else {
+                this.setBlockedHint(check.terrainType);
+            }
+        }
+
+        if (dy !== 0) {
+            const ny = this.player.y + dy;
+            const check = this.getTerrainAtWorld(this.player.x, ny);
+
+            if (!check.solid) {
+                this.player.y = ny;
+            } else {
+                this.setBlockedHint(check.terrainType);
+            }
+        }
+    }
+
+    // -----------------------------
+    // HUD
+    // -----------------------------
+
+    private refreshHud(): void {
+        const tileX = this.worldToTileCoord(this.player.x);
+        const tileY = this.worldToTileCoord(this.player.y);
+
+        const chunkX = this.worldToChunkCoord(this.player.x);
+        const chunkY = this.worldToChunkCoord(this.player.y);
+
+        const stats = this.chunkManager.getStats();
+
+        const t = this.generator.getTerrainAtTile(tileX, tileY);
+
+        const blocked =
+            this.time.now < this.blockedHintUntilMs
+                ? `\n${this.blockedHintText}`
+                : "";
+
+        this.hud.setText(
+            `🧭 Chunk: (${chunkX}, ${chunkY})  🧱 Tile: (${tileX}, ${tileY})  📍 Px: (${this.player.x.toFixed(
+                0
+            )}, ${this.player.y.toFixed(0)})\n` +
+                `🌍 Terrain: ${t.type}  🌊 River: ${t.river01.toFixed(
+                    2
+                )}  🌲 Forest: ${t.forest01.toFixed(2)}\n` +
+                `🎭 Player: ${this.playerState}  ↔️ Facing: ${
+                    this.playerFacingX > 0 ? "right" : "left"
+                }\n` +
+                `📦 Chunks: ${stats.loadedCount}/${
+                    stats.activeCount || 9
+                } loaded  ⏳ Queue: +${stats.pendingLoads} -${stats.pendingUnloads}` +
+                blocked
+        );
+    }
 }
