@@ -58,7 +58,3 @@ If those files aren’t present, it will still run using procedural textures.
 * **Social UI:** users clickable → profile view; small header UI for a timeline of NS people; "bookface" directory-style view.
 
 ---
-
-# If you want, next step could be: add a simple `assets/` folder structure + a placeholder sprite sheet so the procedural fallback becomes optional rather than default.
-
-```
