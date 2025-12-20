@@ -32,7 +32,12 @@ export async function chat(systemPrompt: string, messages: ChatMessage[]): Promi
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
+      // Add timeout to prevent hanging - 10 seconds max
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        signal: controller.signal,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -50,6 +55,8 @@ export async function chat(systemPrompt: string, messages: ChatMessage[]): Promi
           temperature: 0.8,
         }),
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`API error: ${response.status}`);
