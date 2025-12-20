@@ -5,7 +5,6 @@ import {
     HALF_CHUNK_SIZE_PX,
     PLAYER_SPEED_PX_PER_SEC,
     SPRITESHEET_FRAME_SIZE,
-    SPRITESHEET_SCALE,
     TILE_SIZE,
 } from "../constants";
 import WorldGenerator, { TerrainType } from "../world/WorldGenerator";
@@ -33,8 +32,19 @@ import {
     npcIdleAnimKey,
     unitIdleTextureKey,
 } from "./tinySwords";
+import { MultiplayerManager } from "../lib/multiplayer";
+import { OtherPlayer } from "../entities/OtherPlayer";
+import { AINPC } from "../entities/AINPC";
+import { NPC_CHARACTERS } from "../data/npcCharacters";
+import { PlayerData, PlayerState, Gender } from "../types";
 
 type PlayerAnimState = "idle" | "run" | "attack1" | "attack2" | "guard";
+
+interface ChatMessage {
+    name: string;
+    text: string;
+    color: string;
+}
 
 const SPRITESHEET_KEY = "world_sheet";
 const SPRITESHEET_URL = new URL(
@@ -47,6 +57,9 @@ const MINIMAP_URL = new URL(
     "../../sprites/mini_map.png",
     import.meta.url
 ).toString();
+
+const GAME_WIDTH = 800;
+const GAME_HEIGHT = 600;
 
 export default class GameScene extends Phaser.Scene {
     private generator!: WorldGenerator;
@@ -83,8 +96,39 @@ export default class GameScene extends Phaser.Scene {
     private playerFacingX: 1 | -1 = 1; // default facing right
     private playerActionLocked = false;
 
+    // --- Multiplayer properties ---
+    private playerName: string = "Player";
+    private playerGender: Gender = "male";
+    private multiplayer!: MultiplayerManager;
+    private otherPlayers: Map<string, OtherPlayer> = new Map();
+    private playerCount!: Phaser.GameObjects.Text;
+    private chatMessages: ChatMessage[] = [];
+    private chatContainer!: Phaser.GameObjects.Container;
+    private chatInput!: HTMLInputElement;
+    private playerColors: Map<string, string> = new Map();
+    private myColor!: string;
+    private joystickBase!: Phaser.GameObjects.Arc;
+    private joystickThumb!: Phaser.GameObjects.Arc;
+    private joystickPointer: Phaser.Input.Pointer | null = null;
+    private isMobile: boolean = false;
+    private joystickX: number = 0;
+    private joystickY: number = 0;
+
+    // AI NPCs
+    private aiNPCs: AINPC[] = [];
+    private nearbyNPC: AINPC | null = null;
+    private npcInteractionRadius: number = 100;
+    private _talkingToNPC: boolean = false;
+
     constructor() {
         super({ key: "GameScene" });
+    }
+
+    init(data: { player?: PlayerData }): void {
+        if (data.player) {
+            this.playerName = data.player.name;
+            this.playerGender = data.player.gender;
+        }
     }
 
     preload(): void {
@@ -125,7 +169,7 @@ export default class GameScene extends Phaser.Scene {
         );
     }
 
-    create(): void {
+    async create(): Promise<void> {
         // Ensure crisp pixels even when scaled (world spritesheet)
         if (this.textures.exists(SPRITESHEET_KEY)) {
             this.textures
@@ -260,12 +304,14 @@ export default class GameScene extends Phaser.Scene {
             Phaser.Input.Keyboard.KeyCodes.SHIFT
         );
 
-        // HUD
+        // HUD (moved to right side to make room for chat)
         this.hud = this.add
-            .text(10, 10, "", {
+            .text(GAME_WIDTH - 10, 10, "", {
                 fontFamily: EMOJI_FONT_FAMILY,
-                fontSize: "14px",
+                fontSize: "12px",
+                align: "right",
             })
+            .setOrigin(1, 0)
             .setScrollFactor(0)
             .setDepth(1000);
 
@@ -300,7 +346,458 @@ export default class GameScene extends Phaser.Scene {
         this.chunkManager.refresh(this.player.x, this.player.y, true);
         this.chunkManager.processQueues(24);
 
+        // --- Multiplayer Setup ---
+        // Player count display
+        this.playerCount = this.add.text(GAME_WIDTH - 10, GAME_HEIGHT - 30, "Players: 1", {
+            font: "bold 14px Arial",
+            color: "#ffffff",
+            stroke: "#000000",
+            strokeThickness: 3,
+        });
+        this.playerCount.setOrigin(1, 1);
+        this.playerCount.setScrollFactor(0);
+        this.playerCount.setDepth(1000);
+
+        // Generate my color
+        this.myColor = this.generateColor(this.playerName);
+
+        // Check if mobile
+        this.isMobile = this.checkMobile();
+
+        // Create chat UI
+        this.createChatUI();
+
+        // Create mobile controls if on mobile
+        if (this.isMobile) {
+            this.createMobileControls();
+        }
+
+        // Create name tag for player
+        this.createNameTag(this.playerName);
+
+        // Initialize multiplayer
+        await this.initMultiplayer();
+
+        // Spawn AI NPCs
+        this.spawnAINPCs();
+
         this.refreshHud();
+    }
+
+    // --- AI NPC Methods ---
+
+    private spawnAINPCs(): void {
+        // Spawn NPCs at fixed offsets from player spawn
+        const spawnOffsets = [
+            { x: 150, y: -100 },   // Balaji - northeast
+            { x: -150, y: -100 },  // Jackson - northwest
+            { x: 150, y: 150 },    // Otavio - southeast
+            { x: -150, y: 150 },   // Yash - southwest
+        ];
+
+        NPC_CHARACTERS.forEach((character, index) => {
+            const offset = spawnOffsets[index];
+            let npcX = this.player.x + offset.x;
+            let npcY = this.player.y + offset.y;
+
+            // Find walkable tile for NPC
+            const tileX = Math.floor(npcX / TILE_SIZE);
+            const tileY = Math.floor(npcY / TILE_SIZE);
+            const safe = this.findNearestWalkableTile(tileX, tileY, 20);
+            npcX = (safe.tileX + 0.5) * TILE_SIZE;
+            npcY = (safe.tileY + 0.5) * TILE_SIZE;
+
+            const npc = new AINPC(this, npcX, npcY, character);
+            npc.setOnChat((name, text, color) => {
+                this.addChatMessage(name, text, color);
+            });
+
+            this.aiNPCs.push(npc);
+        });
+    }
+
+    private updateNPCProximity(): void {
+        let closest: AINPC | null = null;
+        let closestDist = this.npcInteractionRadius;
+
+        for (const npc of this.aiNPCs) {
+            const dist = Phaser.Math.Distance.Between(
+                this.player.x, this.player.y,
+                npc.x, npc.y
+            );
+
+            if (dist < closestDist) {
+                closestDist = dist;
+                closest = npc;
+            }
+
+            // Update player position so NPC can face them
+            npc.setPlayerPosition(this.player.x, this.player.y);
+
+            // Update in-range state
+            npc.setPlayerInRange(dist < this.npcInteractionRadius);
+        }
+
+        this.nearbyNPC = closest;
+    }
+
+    private async talkToNearbyNPC(message: string): Promise<void> {
+        if (this.nearbyNPC && !this.nearbyNPC.isProcessing()) {
+            this._talkingToNPC = true;
+            await this.nearbyNPC.respondToPlayer(message);
+            this._talkingToNPC = false;
+        }
+    }
+
+    // --- Multiplayer Methods ---
+
+    private checkMobile(): boolean {
+        return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+            (navigator.maxTouchPoints !== undefined && navigator.maxTouchPoints > 2);
+    }
+
+    private generateColor(name: string): string {
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) {
+            hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const h = Math.abs(hash) % 360;
+        const s = 70 + (Math.abs(hash >> 8) % 20);
+        const l = 55 + (Math.abs(hash >> 16) % 15);
+        return `hsl(${h}, ${s}%, ${l}%)`;
+    }
+
+    private getPlayerColor(name: string): string {
+        if (!this.playerColors.has(name)) {
+            this.playerColors.set(name, this.generateColor(name));
+        }
+        return this.playerColors.get(name)!;
+    }
+
+    private createMobileControls(): void {
+        const joystickX = 80;
+        const joystickY = GAME_HEIGHT - 100;
+        const baseRadius = 50;
+        const thumbRadius = 25;
+
+        this.joystickBase = this.add.circle(joystickX, joystickY, baseRadius, 0x000000, 0.4);
+        this.joystickBase.setStrokeStyle(2, 0x4ade80, 0.6);
+        this.joystickBase.setScrollFactor(0);
+        this.joystickBase.setDepth(999);
+
+        this.joystickThumb = this.add.circle(joystickX, joystickY, thumbRadius, 0x4ade80, 0.6);
+        this.joystickThumb.setScrollFactor(0);
+        this.joystickThumb.setDepth(1000);
+
+        const chatBtn = this.add.circle(GAME_WIDTH - 50, GAME_HEIGHT - 100, 30, 0x4ade80, 0.7);
+        chatBtn.setStrokeStyle(2, 0xffffff, 0.5);
+        chatBtn.setScrollFactor(0);
+        chatBtn.setDepth(999);
+        chatBtn.setInteractive();
+
+        const chatIcon = this.add.text(GAME_WIDTH - 50, GAME_HEIGHT - 100, "💬", {
+            font: "24px Arial",
+        });
+        chatIcon.setOrigin(0.5);
+        chatIcon.setScrollFactor(0);
+        chatIcon.setDepth(1000);
+
+        chatBtn.on("pointerdown", () => {
+            this.chatInput.style.display = "block";
+            this.chatInput.focus();
+        });
+
+        this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+            if (pointer.x < GAME_WIDTH / 2 && pointer.y > GAME_HEIGHT / 2) {
+                this.joystickPointer = pointer;
+            }
+        });
+
+        this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
+            if (this.joystickPointer && pointer.id === this.joystickPointer.id) {
+                this.updateJoystick(pointer);
+            }
+        });
+
+        this.input.on("pointerup", (pointer: Phaser.Input.Pointer) => {
+            if (this.joystickPointer && pointer.id === this.joystickPointer.id) {
+                this.resetJoystick();
+            }
+        });
+    }
+
+    private updateJoystick(pointer: Phaser.Input.Pointer): void {
+        const joystickX = 80;
+        const joystickY = GAME_HEIGHT - 100;
+        const maxDistance = 40;
+
+        const dx = pointer.x - joystickX;
+        const dy = pointer.y - joystickY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        let nx = dx;
+        let ny = dy;
+
+        if (distance > maxDistance) {
+            nx = (dx / distance) * maxDistance;
+            ny = (dy / distance) * maxDistance;
+        }
+
+        this.joystickThumb.setPosition(joystickX + nx, joystickY + ny);
+        this.joystickX = nx / maxDistance;
+        this.joystickY = ny / maxDistance;
+    }
+
+    private resetJoystick(): void {
+        const joystickX = 80;
+        const joystickY = GAME_HEIGHT - 100;
+
+        this.joystickThumb.setPosition(joystickX, joystickY);
+        this.joystickPointer = null;
+        this.joystickX = 0;
+        this.joystickY = 0;
+    }
+
+    private createChatUI(): void {
+        this.chatContainer = this.add.container(10, 10);
+        this.chatContainer.setScrollFactor(0);
+        this.chatContainer.setDepth(1000);
+
+        const chatBg = this.add.rectangle(0, 0, 250, 120, 0x000000, 0.5);
+        chatBg.setOrigin(0, 0);
+        chatBg.setStrokeStyle(1, 0x444444);
+        this.chatContainer.add(chatBg);
+
+        const title = this.add.text(10, 5, "Chat", {
+            font: "bold 11px Arial",
+            color: "#888888",
+        });
+        this.chatContainer.add(title);
+
+        this.createChatInput();
+
+        if (!this.isMobile) {
+            const instructions = this.add.text(10, GAME_HEIGHT - 20, "Press Enter to chat | Q/E: Attack | Shift: Guard", {
+                font: "11px Arial",
+                color: "#666666",
+            });
+            instructions.setScrollFactor(0);
+            instructions.setDepth(1000);
+        }
+    }
+
+    private createChatInput(): void {
+        const canvas = this.game.canvas;
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = rect.width / GAME_WIDTH;
+        const scaleY = rect.height / GAME_HEIGHT;
+
+        this.chatInput = document.createElement("input");
+        this.chatInput.type = "text";
+        this.chatInput.placeholder = "Type message...";
+        this.chatInput.maxLength = 100;
+        this.chatInput.style.cssText = `
+            position: absolute;
+            width: 230px;
+            padding: 5px 8px;
+            font-size: 11px;
+            border: 1px solid #4ade80;
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #ffffff;
+            outline: none;
+            display: none;
+        `;
+
+        this.chatInput.style.left = `${rect.left + 10 * scaleX}px`;
+        this.chatInput.style.top = `${rect.top + 135 * scaleY}px`;
+
+        document.body.appendChild(this.chatInput);
+
+        this.chatInput.addEventListener("keydown", (e) => {
+            // Stop all key events from reaching the game
+            e.stopPropagation();
+
+            if (e.key === "Enter" && this.chatInput.value.trim()) {
+                this.sendChatMessage(this.chatInput.value.trim());
+                this.chatInput.value = "";
+                this.chatInput.style.display = "none";
+                this.game.canvas.focus();
+            } else if (e.key === "Escape") {
+                this.chatInput.value = "";
+                this.chatInput.style.display = "none";
+                this.game.canvas.focus();
+            }
+        });
+
+        // Also stop keyup and keypress to fully isolate chat input
+        this.chatInput.addEventListener("keyup", (e) => e.stopPropagation());
+        this.chatInput.addEventListener("keypress", (e) => e.stopPropagation());
+
+        this.chatInput.addEventListener("focus", () => {
+            if (this.input.keyboard) {
+                this.input.keyboard.enabled = false;
+            }
+        });
+
+        this.chatInput.addEventListener("blur", () => {
+            if (this.input.keyboard) {
+                this.input.keyboard.enabled = true;
+            }
+        });
+
+        this.input.keyboard?.on("keydown-ENTER", () => {
+            if (this.chatInput.style.display === "none") {
+                this.chatInput.style.display = "block";
+                this.chatInput.focus();
+            }
+        });
+    }
+
+    private sendChatMessage(text: string): void {
+        // Add our message to chat
+        this.addChatMessage(this.playerName, text, this.myColor);
+
+        // If near an NPC, talk to them instead of broadcasting
+        if (this.nearbyNPC) {
+            this.talkToNearbyNPC(text);
+        } else if (this.multiplayer) {
+            // Otherwise send to multiplayer
+            this.multiplayer.sendChat(text);
+        }
+    }
+
+    private addChatMessage(name: string, text: string, color: string): void {
+        this.chatMessages.push({ name, text, color });
+        if (this.chatMessages.length > 4) {
+            this.chatMessages.shift();
+        }
+        this.renderChatMessages();
+    }
+
+    private renderChatMessages(): void {
+        this.chatContainer.each((child: Phaser.GameObjects.GameObject) => {
+            if (child.getData("isMessage")) {
+                child.destroy();
+            }
+        });
+
+        this.chatMessages.forEach((msg, i) => {
+            const y = 20 + i * 22;
+
+            const nameText = this.add.text(10, y, `${msg.name}:`, {
+                font: "bold 10px Arial",
+                color: msg.color,
+            });
+            nameText.setData("isMessage", true);
+            this.chatContainer.add(nameText);
+
+            const msgText = this.add.text(15 + nameText.width, y, ` ${msg.text}`, {
+                font: "10px Arial",
+                color: "#ffffff",
+                wordWrap: { width: 220 - nameText.width },
+            });
+            msgText.setData("isMessage", true);
+            this.chatContainer.add(msgText);
+        });
+    }
+
+    private async initMultiplayer(): Promise<void> {
+        try {
+            const playerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+            this.multiplayer = new MultiplayerManager(
+                playerId,
+                this.playerName,
+                this.playerGender,
+                this.player.x,
+                this.player.y
+            );
+
+            this.multiplayer.onJoin((playerState: PlayerState) => {
+                this.addOtherPlayer(playerState);
+                this.updatePlayerCount();
+            });
+
+            this.multiplayer.onLeave((playerId: string) => {
+                this.removeOtherPlayer(playerId);
+                this.updatePlayerCount();
+            });
+
+            this.multiplayer.onMove((playerState: PlayerState) => {
+                this.updateOtherPlayer(playerState);
+            });
+
+            this.multiplayer.onChatMessage((_playerId: string, name: string, text: string) => {
+                const color = this.getPlayerColor(name);
+                this.addChatMessage(name, text, color);
+            });
+
+            await this.multiplayer.connect();
+        } catch (error) {
+            console.error("Failed to connect to multiplayer:", error);
+        }
+    }
+
+    private addOtherPlayer(playerState: PlayerState): void {
+        if (this.otherPlayers.has(playerState.id)) return;
+
+        const otherPlayer = new OtherPlayer(
+            this,
+            playerState.x,
+            playerState.y,
+            playerState.id,
+            playerState.name,
+            playerState.gender
+        );
+
+        this.otherPlayers.set(playerState.id, otherPlayer);
+    }
+
+    private removeOtherPlayer(playerId: string): void {
+        const otherPlayer = this.otherPlayers.get(playerId);
+        if (otherPlayer) {
+            otherPlayer.destroy();
+            this.otherPlayers.delete(playerId);
+        }
+    }
+
+    private updateOtherPlayer(playerState: PlayerState): void {
+        let otherPlayer = this.otherPlayers.get(playerState.id);
+
+        if (!otherPlayer) {
+            this.addOtherPlayer(playerState);
+            otherPlayer = this.otherPlayers.get(playerState.id);
+        }
+
+        if (otherPlayer) {
+            otherPlayer.updatePosition(
+                playerState.x,
+                playerState.y,
+                playerState.direction,
+                playerState.isMoving
+            );
+        }
+    }
+
+    private updatePlayerCount(): void {
+        const count = this.otherPlayers.size + 1;
+        this.playerCount.setText(`Players: ${count}`);
+    }
+
+    private createNameTag(name: string): void {
+        const nameTag = this.add.text(0, -50, name, {
+            font: "bold 12px Arial",
+            color: "#ffffff",
+            stroke: "#000000",
+            strokeThickness: 3,
+        });
+        nameTag.setOrigin(0.5);
+        nameTag.setDepth(1001);
+
+        this.events.on("update", () => {
+            nameTag.setPosition(this.player.x, this.player.y - 50);
+        });
     }
 
     update(_time: number, delta: number): void {
@@ -309,10 +806,17 @@ export default class GameScene extends Phaser.Scene {
         let moveX = 0;
         let moveY = 0;
 
+        // Keyboard input
         if (this.keyW.isDown) moveY -= 1;
         if (this.keyS.isDown) moveY += 1;
         if (this.keyA.isDown) moveX -= 1;
         if (this.keyD.isDown) moveX += 1;
+
+        // Mobile joystick input
+        if (this.joystickX !== 0 || this.joystickY !== 0) {
+            moveX = this.joystickX;
+            moveY = this.joystickY;
+        }
 
         // Facing (left/right flip). Default right, keep last when moving only vertically.
         if (moveX !== 0) {
@@ -344,6 +848,7 @@ export default class GameScene extends Phaser.Scene {
 
         // Movement is blocked while guarding or during attacks
         const allowMove = !this.playerActionLocked && !wantGuard;
+        const isMoving = moveX !== 0 || moveY !== 0;
 
         if (allowMove) {
             const len = Math.hypot(moveX, moveY);
@@ -363,6 +868,28 @@ export default class GameScene extends Phaser.Scene {
 
         // Time-sliced chunk work
         this.chunkManager.processQueues(this.chunkWorkBudgetMs);
+
+        // Broadcast position to other players
+        if (this.multiplayer) {
+            const direction = this.playerFacingX > 0 ? "right" : "left";
+            this.multiplayer.broadcastPosition(
+                this.player.x,
+                this.player.y,
+                direction,
+                isMoving && allowMove
+            );
+        }
+
+        // Update other players
+        this.otherPlayers.forEach((otherPlayer) => {
+            otherPlayer.update();
+        });
+
+        // Update AI NPCs
+        this.updateNPCProximity();
+        this.aiNPCs.forEach((npc) => {
+            npc.update();
+        });
 
         this.refreshHud();
     }
@@ -450,7 +977,9 @@ export default class GameScene extends Phaser.Scene {
             (this.keyW?.isDown ?? false) ||
             (this.keyA?.isDown ?? false) ||
             (this.keyS?.isDown ?? false) ||
-            (this.keyD?.isDown ?? false);
+            (this.keyD?.isDown ?? false) ||
+            this.joystickX !== 0 ||
+            this.joystickY !== 0;
 
         if (wantGuard) {
             this.applyPlayerState("guard");
@@ -498,7 +1027,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     private setBlockedHint(terrainType: TerrainType): void {
-        this.blockedHintText = `🚫 Blocked by ${terrainType}`;
+        this.blockedHintText = `Blocked by ${terrainType}`;
         this.blockedHintUntilMs = this.time.now + 900;
     }
 
@@ -546,20 +1075,30 @@ export default class GameScene extends Phaser.Scene {
                 ? `\n${this.blockedHintText}`
                 : "";
 
+        const npcInfo = this.nearbyNPC
+            ? `\nTalking to: ${this.nearbyNPC.npcName}`
+            : "";
+
         this.hud.setText(
-            `🧭 Chunk: (${chunkX}, ${chunkY})  🧱 Tile: (${tileX}, ${tileY})  📍 Px: (${this.player.x.toFixed(
-                0
-            )}, ${this.player.y.toFixed(0)})\n` +
-                `🌍 Terrain: ${t.type}  🌊 River: ${t.river01.toFixed(
-                    2
-                )}  🌲 Forest: ${t.forest01.toFixed(2)}\n` +
-                `🎭 Player: ${this.playerState}  ↔️ Facing: ${
-                    this.playerFacingX > 0 ? "right" : "left"
-                }\n` +
-                `📦 Chunks: ${stats.loadedCount}/${
-                    stats.activeCount || 9
-                } loaded  ⏳ Queue: +${stats.pendingLoads} -${stats.pendingUnloads}` +
-                blocked
+            `Chunk: (${chunkX}, ${chunkY}) Tile: (${tileX}, ${tileY})\n` +
+                `Terrain: ${t.type}\n` +
+                `${this.playerState} | ${this.playerFacingX > 0 ? "R" : "L"}\n` +
+                `Chunks: ${stats.loadedCount}/${stats.activeCount || 9}` +
+                blocked +
+                npcInfo
         );
+    }
+
+    // -----------------------------
+    // Cleanup
+    // -----------------------------
+
+    shutdown(): void {
+        if (this.multiplayer) {
+            this.multiplayer.disconnect();
+        }
+        if (this.chatInput?.parentNode) {
+            this.chatInput.remove();
+        }
     }
 }

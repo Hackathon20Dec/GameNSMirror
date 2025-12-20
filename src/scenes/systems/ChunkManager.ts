@@ -32,7 +32,7 @@ export interface ChunkManagerStats {
     * Keeps the scene responsive by time-slicing chunk load/unload work.
     */
 export default class ChunkManager {
-    private readonly scene: Phaser.Scene;
+    private readonly _scene: Phaser.Scene;
     private readonly config: ChunkManagerConfig;
     private readonly buildChunkObjects: (
         cx: number,
@@ -53,7 +53,7 @@ export default class ChunkManager {
         config: ChunkManagerConfig,
         buildChunkObjects: (cx: number, cy: number) => Phaser.GameObjects.GameObject[]
     ) {
-        this.scene = scene;
+        this._scene = scene;
         this.config = config;
         this.buildChunkObjects = buildChunkObjects;
     }

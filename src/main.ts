@@ -1,5 +1,7 @@
 import Phaser from "phaser";
 import "./style.css";
+import BootScene from "./scenes/BootScene";
+import TitleScene from "./scenes/TitleScene";
 import GameScene from "./scenes/GameScene";
 
 const config: Phaser.Types.Core.GameConfig = {
@@ -19,7 +21,7 @@ const config: Phaser.Types.Core.GameConfig = {
             debug: false,
         },
     },
-    scene: [GameScene],
+    scene: [BootScene, TitleScene, GameScene],
     pixelArt: true,
     render: {
         antialias: false,

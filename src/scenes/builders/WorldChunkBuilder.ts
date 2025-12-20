@@ -191,7 +191,7 @@ export default class WorldChunkBuilder {
     }
 
     private paintLayout(
-        layer: Phaser.Tilemaps.DynamicTilemapLayer,
+        layer: Phaser.Tilemaps.TilemapLayer,
         localX: number,
         localY: number,
         layout: TileLayout
@@ -384,7 +384,7 @@ export default class WorldChunkBuilder {
         cx: number,
         cy: number,
         origin: { tileX: number; tileY: number },
-        entityLayer: Phaser.Tilemaps.DynamicTilemapLayer,
+        entityLayer: Phaser.Tilemaps.TilemapLayer,
         buildingOcc: boolean[][],
         placeable: boolean[][],
         terrainTypes: TerrainType[][],
@@ -550,7 +550,7 @@ export default class WorldChunkBuilder {
         cx: number,
         cy: number,
         origin: { tileX: number; tileY: number },
-        entityLayer: Phaser.Tilemaps.DynamicTilemapLayer,
+        entityLayer: Phaser.Tilemaps.TilemapLayer,
         buildingOcc: boolean[][],
         placeable: boolean[][],
         terrainTypes: TerrainType[][],
@@ -641,7 +641,7 @@ export default class WorldChunkBuilder {
 
     private placeNature(
         origin: { tileX: number; tileY: number },
-        entityLayer: Phaser.Tilemaps.DynamicTilemapLayer,
+        entityLayer: Phaser.Tilemaps.TilemapLayer,
         occupied: boolean[][],
         placeable: boolean[][],
         terrainTypes: TerrainType[][],

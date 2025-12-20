@@ -337,7 +337,7 @@ function uint32ToUnitFloat(u: number): number {
  * Small fast PRNG (mulberry32 by @bryc).
  * Produces floats in [0, 1).
  */
-function mulberry32(a: number): () => number {
+function _mulberry32(a: number): () => number {
     return () => {
         let t = (a += 0x6d2b79f5);
         t = Math.imul(t ^ (t >>> 15), t | 1);
@@ -480,7 +480,7 @@ function createSeededNoise2D(seed: string): Noise2D {
 }
 
 export default class WorldGenerator {
-    private readonly seed: string;
+    private readonly _seed: string;
     private readonly seedHash: number;
 
     // ---- Noise fields (reworked worldgen) ----
@@ -516,7 +516,7 @@ export default class WorldGenerator {
     private readonly entityTypeHash: Record<EntityType, number>;
 
     constructor(seed: string) {
-        this.seed = seed;
+        this._seed = seed;
         this.seedHash = hashStringToUint32(seed);
 
         this.continentNoise = createSeededNoise2D(`${seed}::continent`);
