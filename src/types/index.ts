@@ -8,3 +8,13 @@ export interface PlayerData {
 export interface GameData {
   player: PlayerData;
 }
+
+export interface PlayerState {
+  id: string;
+  name: string;
+  gender: Gender;
+  x: number;
+  y: number;
+  direction: string;
+  isMoving: boolean;
+}

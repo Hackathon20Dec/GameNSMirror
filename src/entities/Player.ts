@@ -11,7 +11,8 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     D: Phaser.Input.Keyboard.Key;
   };
   private spriteKey: string;
-  private currentDirection: string = 'down';
+  private _currentDirection: string = 'down';
+  private _isMoving: boolean = false;
   public playerName: string;
 
   constructor(
@@ -83,28 +84,39 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
 
     // Update animation based on movement
     if (velocityX !== 0 || velocityY !== 0) {
+      this._isMoving = true;
+
       // Determine direction (prioritize last pressed)
-      if (left && this.currentDirection !== 'left') {
-        this.currentDirection = 'left';
-      } else if (right && this.currentDirection !== 'right') {
-        this.currentDirection = 'right';
-      } else if (up && this.currentDirection !== 'up') {
-        this.currentDirection = 'up';
-      } else if (down && this.currentDirection !== 'down') {
-        this.currentDirection = 'down';
+      if (left && this._currentDirection !== 'left') {
+        this._currentDirection = 'left';
+      } else if (right && this._currentDirection !== 'right') {
+        this._currentDirection = 'right';
+      } else if (up && this._currentDirection !== 'up') {
+        this._currentDirection = 'up';
+      } else if (down && this._currentDirection !== 'down') {
+        this._currentDirection = 'down';
       }
 
       // Set walking direction based on velocity priority
       if (Math.abs(velocityX) > Math.abs(velocityY)) {
-        this.currentDirection = velocityX < 0 ? 'left' : 'right';
+        this._currentDirection = velocityX < 0 ? 'left' : 'right';
       } else if (velocityY !== 0) {
-        this.currentDirection = velocityY < 0 ? 'up' : 'down';
+        this._currentDirection = velocityY < 0 ? 'up' : 'down';
       }
 
-      this.play(`${this.spriteKey}_walk_${this.currentDirection}`, true);
+      this.play(`${this.spriteKey}_walk_${this._currentDirection}`, true);
     } else {
+      this._isMoving = false;
       // Idle
-      this.play(`${this.spriteKey}_idle_${this.currentDirection}`, true);
+      this.play(`${this.spriteKey}_idle_${this._currentDirection}`, true);
     }
+  }
+
+  get currentDirection(): string {
+    return this._currentDirection;
+  }
+
+  get isMoving(): boolean {
+    return this._isMoving;
   }
 }

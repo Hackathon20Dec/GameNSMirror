@@ -1,13 +1,18 @@
 import Phaser from 'phaser';
 import { SCENES, TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, GAME_WIDTH } from '../config/constants';
 import { Player } from '../entities/Player';
-import { PlayerData } from '../types';
+import { OtherPlayer } from '../entities/OtherPlayer';
+import { PlayerData, PlayerState } from '../types';
+import { MultiplayerManager } from '../lib/multiplayer';
 
 export class GameScene extends Phaser.Scene {
   private player!: Player;
   private map!: Phaser.Tilemaps.Tilemap;
   private groundLayer!: Phaser.Tilemaps.TilemapLayer;
   private obstaclesLayer!: Phaser.Tilemaps.TilemapLayer;
+  private multiplayer!: MultiplayerManager;
+  private otherPlayers: Map<string, OtherPlayer> = new Map();
+  private playerCount!: Phaser.GameObjects.Text;
 
   constructor() {
     super({ key: SCENES.GAME });
@@ -17,7 +22,7 @@ export class GameScene extends Phaser.Scene {
     this.data.set('playerData', data.player);
   }
 
-  create(): void {
+  async create(): Promise<void> {
     const playerData = this.data.get('playerData') as PlayerData;
 
     // Create tilemap
@@ -43,10 +48,100 @@ export class GameScene extends Phaser.Scene {
 
     // Display welcome message
     this.showWelcomeMessage(playerData.name);
+
+    // Player count display
+    this.playerCount = this.add.text(GAME_WIDTH - 20, 20, 'Players: 1', {
+      font: 'bold 16px Arial',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 3,
+    });
+    this.playerCount.setOrigin(1, 0);
+    this.playerCount.setScrollFactor(0);
+
+    // Initialize multiplayer
+    await this.initMultiplayer(playerData, startX, startY);
+  }
+
+  private async initMultiplayer(playerData: PlayerData, startX: number, startY: number): Promise<void> {
+    try {
+      const oderId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      this.multiplayer = new MultiplayerManager(
+        oderId,
+        playerData.name,
+        playerData.gender,
+        startX,
+        startY
+      );
+
+      this.multiplayer.onJoin((playerState: PlayerState) => {
+        this.addOtherPlayer(playerState);
+        this.updatePlayerCount();
+      });
+
+      this.multiplayer.onLeave((oderId: string) => {
+        this.removeOtherPlayer(oderId);
+        this.updatePlayerCount();
+      });
+
+      this.multiplayer.onMove((playerState: PlayerState) => {
+        this.updateOtherPlayer(playerState);
+      });
+
+      await this.multiplayer.connect();
+    } catch (error) {
+      console.error('Failed to connect to multiplayer:', error);
+    }
+  }
+
+  private addOtherPlayer(playerState: PlayerState): void {
+    if (this.otherPlayers.has(playerState.id)) return;
+
+    const otherPlayer = new OtherPlayer(
+      this,
+      playerState.x,
+      playerState.y,
+      playerState.id,
+      playerState.name,
+      playerState.gender
+    );
+
+    this.otherPlayers.set(playerState.id, otherPlayer);
+  }
+
+  private removeOtherPlayer(oderId: string): void {
+    const otherPlayer = this.otherPlayers.get(oderId);
+    if (otherPlayer) {
+      otherPlayer.destroy();
+      this.otherPlayers.delete(oderId);
+    }
+  }
+
+  private updateOtherPlayer(playerState: PlayerState): void {
+    let otherPlayer = this.otherPlayers.get(playerState.id);
+
+    if (!otherPlayer) {
+      this.addOtherPlayer(playerState);
+      otherPlayer = this.otherPlayers.get(playerState.id);
+    }
+
+    if (otherPlayer) {
+      otherPlayer.updatePosition(
+        playerState.x,
+        playerState.y,
+        playerState.direction,
+        playerState.isMoving
+      );
+    }
+  }
+
+  private updatePlayerCount(): void {
+    const count = this.otherPlayers.size + 1;
+    this.playerCount.setText(`Players: ${count}`);
   }
 
   private createMap(): void {
-    // Create a blank tilemap
     this.map = this.make.tilemap({
       tileWidth: TILE_SIZE,
       tileHeight: TILE_SIZE,
@@ -54,39 +149,29 @@ export class GameScene extends Phaser.Scene {
       height: MAP_HEIGHT,
     });
 
-    // Add tileset
     const tileset = this.map.addTilesetImage('tiles', 'tiles', TILE_SIZE, TILE_SIZE, 0, 0);
 
     if (!tileset) {
-      // Fallback: create procedural ground
       this.createProceduralMap();
       return;
     }
 
-    // Create ground layer
     this.groundLayer = this.map.createBlankLayer('ground', tileset, 0, 0)!;
 
-    // Fill with grass
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
-        // Use tile index 0 for grass (or vary for visual interest)
         const tileIndex = Math.random() > 0.9 ? 1 : 0;
         this.groundLayer.putTileAt(tileIndex, x, y);
       }
     }
 
-    // Create obstacles layer
     this.obstaclesLayer = this.map.createBlankLayer('obstacles', tileset, 0, 0)!;
-
-    // Add some random obstacles (trees, rocks)
     this.addObstacles();
   }
 
   private createProceduralMap(): void {
-    // Create colored rectangle tiles as fallback
     const graphics = this.add.graphics();
 
-    // Draw grass background
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
         const shade = 0.9 + Math.random() * 0.2;
@@ -97,36 +182,28 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Add obstacle rectangles
     const obstacleGroup = this.physics.add.staticGroup();
 
-    // Add trees (dark green circles)
     for (let i = 0; i < 30; i++) {
       const x = Phaser.Math.Between(2, MAP_WIDTH - 3) * TILE_SIZE + TILE_SIZE / 2;
       const y = Phaser.Math.Between(2, MAP_HEIGHT - 3) * TILE_SIZE + TILE_SIZE / 2;
 
-      // Skip if too close to center (player spawn)
       const centerX = (MAP_WIDTH * TILE_SIZE) / 2;
       const centerY = (MAP_HEIGHT * TILE_SIZE) / 2;
       if (Math.abs(x - centerX) < TILE_SIZE * 3 && Math.abs(y - centerY) < TILE_SIZE * 3) {
         continue;
       }
 
-      // Tree trunk
       graphics.fillStyle(0x8B4513);
       graphics.fillRect(x - 4, y, 8, 16);
-
-      // Tree foliage
       graphics.fillStyle(0x228B22);
       graphics.fillCircle(x, y - 8, 20);
 
-      // Add collision
       const obstacle = obstacleGroup.create(x, y + 8, undefined) as Phaser.Physics.Arcade.Sprite;
       obstacle.setVisible(false);
       obstacle.body?.setSize(24, 16);
     }
 
-    // Add rocks (gray)
     for (let i = 0; i < 15; i++) {
       const x = Phaser.Math.Between(2, MAP_WIDTH - 3) * TILE_SIZE + TILE_SIZE / 2;
       const y = Phaser.Math.Between(2, MAP_HEIGHT - 3) * TILE_SIZE + TILE_SIZE / 2;
@@ -147,7 +224,6 @@ export class GameScene extends Phaser.Scene {
       obstacle.body?.setSize(24, 16);
     }
 
-    // Add fence around the perimeter
     graphics.fillStyle(0x8B4513);
     for (let x = 0; x < MAP_WIDTH; x++) {
       graphics.fillRect(x * TILE_SIZE, 0, TILE_SIZE, 8);
@@ -174,12 +250,10 @@ export class GameScene extends Phaser.Scene {
       rightFence.body?.setSize(8, TILE_SIZE);
     }
 
-    // Store for collision
     this.physics.add.collider(this.player, obstacleGroup);
   }
 
   private addObstacles(): void {
-    // Add some trees and rocks
     const treePositions = [
       { x: 5, y: 5 }, { x: 10, y: 3 }, { x: 15, y: 8 },
       { x: 25, y: 5 }, { x: 30, y: 10 }, { x: 8, y: 20 },
@@ -203,7 +277,6 @@ export class GameScene extends Phaser.Scene {
     });
     nameTag.setOrigin(0.5);
 
-    // Make name tag follow player
     this.events.on('update', () => {
       nameTag.setPosition(this.player.x, this.player.y - 40);
     });
@@ -228,7 +301,6 @@ export class GameScene extends Phaser.Scene {
     controlsText.setOrigin(0.5);
     controlsText.setScrollFactor(0);
 
-    // Fade out after 3 seconds
     this.time.delayedCall(3000, () => {
       this.tweens.add({
         targets: [welcomeText, controlsText],
@@ -244,5 +316,26 @@ export class GameScene extends Phaser.Scene {
 
   update(): void {
     this.player.update();
+
+    // Broadcast position
+    if (this.multiplayer) {
+      this.multiplayer.broadcastPosition(
+        this.player.x,
+        this.player.y,
+        this.player.currentDirection,
+        this.player.isMoving
+      );
+    }
+
+    // Update other players
+    this.otherPlayers.forEach((otherPlayer) => {
+      otherPlayer.update();
+    });
+  }
+
+  shutdown(): void {
+    if (this.multiplayer) {
+      this.multiplayer.disconnect();
+    }
   }
 }
