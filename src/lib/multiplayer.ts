@@ -4,6 +4,8 @@ type PlayerJoinCallback = (player: PlayerState) => void;
 type PlayerLeaveCallback = (playerId: string) => void;
 type PlayerMoveCallback = (player: PlayerState) => void;
 type ChatCallback = (playerId: string, name: string, text: string) => void;
+// MODIFICATION 2: Add NPC chat callback type for synchronized AI responses
+type NPCChatCallback = (npcName: string, text: string, color: string) => void;
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'ws://localhost:3001';
 
@@ -16,6 +18,8 @@ export class MultiplayerManager {
   private onPlayerLeave: PlayerLeaveCallback | null = null;
   private onPlayerMove: PlayerMoveCallback | null = null;
   private onChat: ChatCallback | null = null;
+  // MODIFICATION 2: NPC chat synchronization callback
+  private onNPCChat: NPCChatCallback | null = null;
   private lastBroadcast: number = 0;
   private broadcastInterval: number = 50; // ms between broadcasts
   private reconnectAttempts: number = 0;
@@ -131,6 +135,13 @@ export class MultiplayerManager {
           this.onChat(message.playerId, message.name, message.text);
         }
         break;
+
+      // MODIFICATION 2: Handle NPC chat messages from other players
+      case 'npc-chat':
+        if (this.onNPCChat) {
+          this.onNPCChat(message.npcName, message.text, message.color);
+        }
+        break;
     }
   }
 
@@ -175,6 +186,19 @@ export class MultiplayerManager {
     });
   }
 
+  /**
+   * MODIFICATION 2: Send NPC chat to all connected players
+   * This synchronizes AI NPC dialogues across all players
+   */
+  sendNPCChat(npcName: string, text: string, color: string): void {
+    this.send({
+      type: 'npc-chat',
+      npcName,
+      text,
+      color
+    });
+  }
+
   onJoin(callback: PlayerJoinCallback): void {
     this.onPlayerJoin = callback;
   }
@@ -189,6 +213,13 @@ export class MultiplayerManager {
 
   onChatMessage(callback: ChatCallback): void {
     this.onChat = callback;
+  }
+
+  /**
+   * MODIFICATION 2: Register callback for NPC chat synchronization
+   */
+  onNPCChatMessage(callback: NPCChatCallback): void {
+    this.onNPCChat = callback;
   }
 
   disconnect(): void {

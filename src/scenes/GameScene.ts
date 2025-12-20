@@ -21,14 +21,12 @@ import {
     ANIM_PLAYER_IDLE,
     ANIM_PLAYER_RUN,
     NPC_UNIT_TYPES,
-    PLAYER_COLOR_ID,
     TEX_PLAYER_ATTACK1,
     TEX_PLAYER_ATTACK2,
     TEX_PLAYER_GUARD,
     TEX_PLAYER_IDLE,
     TEX_PLAYER_RUN,
     UNIT_COLORS,
-    assetUrl,
     npcIdleAnimKey,
     unitIdleTextureKey,
 } from "./tinySwords";
@@ -120,6 +118,18 @@ export default class GameScene extends Phaser.Scene {
     private npcInteractionRadius: number = 100;
     private _talkingToNPC: boolean = false;
 
+    // Player skin system - random skin based on gender with directional animations
+    private playerSkinKey: string = "";
+    private playerDirection: "down" | "left" | "right" | "up" = "down";
+
+    // Skin definitions - 10 skins per gender
+    private static readonly MALE_SKINS = Array.from({ length: 10 }, (_, i) =>
+        `guest_male_${String(i + 1).padStart(2, "0")}`
+    );
+    private static readonly FEMALE_SKINS = Array.from({ length: 10 }, (_, i) =>
+        `guest_female_${String(i + 1).padStart(2, "0")}`
+    );
+
     constructor() {
         super({ key: "GameScene" });
     }
@@ -141,32 +151,50 @@ export default class GameScene extends Phaser.Scene {
         this.load.image(MINIMAP_KEY, MINIMAP_URL);
 
         // --- Tiny Swords unit idle sheets (for NPCs + player idle) ---
+        // Loading from public/assets/units/ with normalized naming
+        const colorMap: Record<string, string> = {
+            "blue": "Blue_Units",
+            "red": "Red_Units",
+            "yellow": "Yellow_Units",
+            "purple": "Purple_Units",
+            "black": "Black_Units",
+        };
+        const unitMap: Record<string, string> = {
+            "warrior": "Warrior",
+            "archer": "Archer",
+            "lancer": "Lancer",
+            "monk": "Monk",
+            "pawn": "Pawn",
+        };
+
         for (const c of UNIT_COLORS) {
             for (const u of NPC_UNIT_TYPES) {
                 const key = unitIdleTextureKey(c.id, u.id);
-                const rel = `../../Tiny Swords/Units/${c.folder}/${u.folder}/${u.idleFile}`;
-                this.load.image(key, assetUrl(rel));
+                const colorFolder = colorMap[c.id];
+                const unitName = unitMap[u.id];
+                if (colorFolder && unitName) {
+                    this.load.image(key, `/assets/units/${colorFolder}_${unitName}_Idle.png`);
+                }
             }
         }
 
         // --- Player-specific warrior actions (run/attack/guard) ---
-        const playerColorFolder =
-            UNIT_COLORS.find((c) => c.id === PLAYER_COLOR_ID)?.folder ?? "Blue Units";
-        const warriorBase = `../../Tiny Swords/Units/${playerColorFolder}/Warrior/`;
+        // Loading from public/assets/sprites/
+        this.load.image(TEX_PLAYER_RUN, "/assets/sprites/Warrior_Run.png");
+        this.load.image(TEX_PLAYER_ATTACK1, "/assets/sprites/Warrior_Attack1.png");
+        this.load.image(TEX_PLAYER_ATTACK2, "/assets/sprites/Warrior_Attack2.png");
+        this.load.image(TEX_PLAYER_GUARD, "/assets/sprites/Warrior_Guard.png");
 
-        this.load.image(TEX_PLAYER_RUN, assetUrl(`${warriorBase}Warrior_Run.png`));
-        this.load.image(
-            TEX_PLAYER_ATTACK1,
-            assetUrl(`${warriorBase}Warrior_Attack1.png`)
-        );
-        this.load.image(
-            TEX_PLAYER_ATTACK2,
-            assetUrl(`${warriorBase}Warrior_Attack2.png`)
-        );
-        this.load.image(
-            TEX_PLAYER_GUARD,
-            assetUrl(`${warriorBase}Warrior_Guard.png`)
-        );
+        // --- Load all player character skins (10 male + 10 female) ---
+        // These are 4x4 spritesheets (512x512, 128x128 per frame)
+        // Layout: Row 0 = down, Row 1 = left, Row 2 = right, Row 3 = up
+        const allSkins = [...GameScene.MALE_SKINS, ...GameScene.FEMALE_SKINS];
+        for (const skin of allSkins) {
+            this.load.spritesheet(skin, `/assets/PlayCharacters/${skin}_preview.png`, {
+                frameWidth: 128,
+                frameHeight: 128,
+            });
+        }
     }
 
     async create(): Promise<void> {
@@ -386,34 +414,55 @@ export default class GameScene extends Phaser.Scene {
 
     // --- AI NPC Methods ---
 
+    /**
+     * NPCs spawn at FIXED WORLD POSITIONS (constant across sessions)
+     * - All 4 NPCs positioned ABOVE the river (negative Y = upward)
+     * - Evenly spread across the upper portion of the map
+     * - Uses deterministic walkable tile search that prioritizes upward tiles
+     */
     private spawnAINPCs(): void {
-        // Spawn NPCs at fixed offsets from player spawn
-        const spawnOffsets = [
-            { x: 150, y: -100 },   // Balaji - northeast
-            { x: -150, y: -100 },  // Jackson - northwest
-            { x: 150, y: 150 },    // Otavio - southeast
-            { x: -150, y: 150 },   // Yash - southwest
+        // FIXED world coordinates for each NPC - evenly spread ABOVE river
+        // All NPCs are in negative Y territory (above player spawn area)
+        // Spread across a wide horizontal range for even distribution
+        const FIXED_NPC_POSITIONS = [
+            { id: 'balaji', x: -200, y: -180 },   // Balaji - far upper-left
+            { id: 'jackson', x: 200, y: -180 },   // Jackson - far upper-right
+            { id: 'otavio', x: -80, y: -280 },    // Otavio - center-left, further up
+            { id: 'yash', x: 80, y: -280 },       // Yash - center-right, further up
         ];
 
         NPC_CHARACTERS.forEach((character, index) => {
-            const offset = spawnOffsets[index];
-            let npcX = this.player.x + offset.x;
-            let npcY = this.player.y + offset.y;
+            const fixedPos = FIXED_NPC_POSITIONS[index];
 
-            // Find walkable tile for NPC
-            const tileX = Math.floor(npcX / TILE_SIZE);
-            const tileY = Math.floor(npcY / TILE_SIZE);
-            const safe = this.findNearestWalkableTile(tileX, tileY, 20);
-            npcX = (safe.tileX + 0.5) * TILE_SIZE;
-            npcY = (safe.tileY + 0.5) * TILE_SIZE;
+            // Use fixed world coordinates (not relative to player)
+            const targetTileX = Math.floor(fixedPos.x / TILE_SIZE);
+            const targetTileY = Math.floor(fixedPos.y / TILE_SIZE);
+
+            // Find nearest walkable tile, prioritizing UPWARD direction
+            // This ensures NPCs are NEVER placed below (positive Y) the target
+            const safe = this.findNearestWalkableTileUpward(targetTileX, targetTileY, 80);
+            const npcX = (safe.tileX + 0.5) * TILE_SIZE;
+            const npcY = (safe.tileY + 0.5) * TILE_SIZE;
 
             const npc = new AINPC(this, npcX, npcY, character);
+
+            // Broadcast NPC messages to all players via multiplayer
             npc.setOnChat((name, text, color) => {
                 this.addChatMessage(name, text, color);
+                this.broadcastNPCChat(name, text, color);
             });
 
             this.aiNPCs.push(npc);
         });
+    }
+
+    /**
+     * MODIFICATION 2: Broadcast NPC dialogue to all connected players
+     */
+    private broadcastNPCChat(name: string, text: string, color: string): void {
+        if (this.multiplayer) {
+            this.multiplayer.sendNPCChat(name, text, color);
+        }
     }
 
     private updateNPCProximity(): void {
@@ -475,28 +524,52 @@ export default class GameScene extends Phaser.Scene {
     }
 
     private createMobileControls(): void {
-        const joystickX = 80;
-        const joystickY = GAME_HEIGHT - 100;
-        const baseRadius = 50;
-        const thumbRadius = 25;
+        const joystickX = 90;
+        const joystickY = GAME_HEIGHT - 110;
+        const baseRadius = 60;
+        const thumbRadius = 30;
 
-        this.joystickBase = this.add.circle(joystickX, joystickY, baseRadius, 0x000000, 0.4);
-        this.joystickBase.setStrokeStyle(2, 0x4ade80, 0.6);
+        // Joystick base with better visibility
+        this.joystickBase = this.add.circle(joystickX, joystickY, baseRadius, 0x000000, 0.5);
+        this.joystickBase.setStrokeStyle(3, 0x4ade80, 0.8);
         this.joystickBase.setScrollFactor(0);
         this.joystickBase.setDepth(999);
 
-        this.joystickThumb = this.add.circle(joystickX, joystickY, thumbRadius, 0x4ade80, 0.6);
+        // Joystick thumb
+        this.joystickThumb = this.add.circle(joystickX, joystickY, thumbRadius, 0x4ade80, 0.7);
+        this.joystickThumb.setStrokeStyle(2, 0xffffff, 0.5);
         this.joystickThumb.setScrollFactor(0);
         this.joystickThumb.setDepth(1000);
 
-        const chatBtn = this.add.circle(GAME_WIDTH - 50, GAME_HEIGHT - 100, 30, 0x4ade80, 0.7);
+        // Attack button (bottom-right area)
+        const attackBtn = this.add.circle(GAME_WIDTH - 70, GAME_HEIGHT - 80, 35, 0xe53935, 0.7);
+        attackBtn.setStrokeStyle(3, 0xffffff, 0.5);
+        attackBtn.setScrollFactor(0);
+        attackBtn.setDepth(999);
+        attackBtn.setInteractive();
+
+        const attackIcon = this.add.text(GAME_WIDTH - 70, GAME_HEIGHT - 80, "⚔️", {
+            font: "28px Arial",
+        });
+        attackIcon.setOrigin(0.5);
+        attackIcon.setScrollFactor(0);
+        attackIcon.setDepth(1000);
+
+        attackBtn.on("pointerdown", () => {
+            if (!this.playerActionLocked) {
+                this.startPlayerAttack("attack1");
+            }
+        });
+
+        // Chat button (top of attack button)
+        const chatBtn = this.add.circle(GAME_WIDTH - 70, GAME_HEIGHT - 160, 30, 0x4ade80, 0.7);
         chatBtn.setStrokeStyle(2, 0xffffff, 0.5);
         chatBtn.setScrollFactor(0);
         chatBtn.setDepth(999);
         chatBtn.setInteractive();
 
-        const chatIcon = this.add.text(GAME_WIDTH - 50, GAME_HEIGHT - 100, "💬", {
-            font: "24px Arial",
+        const chatIcon = this.add.text(GAME_WIDTH - 70, GAME_HEIGHT - 160, "💬", {
+            font: "22px Arial",
         });
         chatIcon.setOrigin(0.5);
         chatIcon.setScrollFactor(0);
@@ -507,8 +580,10 @@ export default class GameScene extends Phaser.Scene {
             this.chatInput.focus();
         });
 
+        // Joystick touch handling
         this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-            if (pointer.x < GAME_WIDTH / 2 && pointer.y > GAME_HEIGHT / 2) {
+            // Left half of screen and bottom area for joystick
+            if (pointer.x < GAME_WIDTH / 2 && pointer.y > GAME_HEIGHT / 3) {
                 this.joystickPointer = pointer;
             }
         });
@@ -527,9 +602,9 @@ export default class GameScene extends Phaser.Scene {
     }
 
     private updateJoystick(pointer: Phaser.Input.Pointer): void {
-        const joystickX = 80;
-        const joystickY = GAME_HEIGHT - 100;
-        const maxDistance = 40;
+        const joystickX = 90;
+        const joystickY = GAME_HEIGHT - 110;
+        const maxDistance = 50;
 
         const dx = pointer.x - joystickX;
         const dy = pointer.y - joystickY;
@@ -549,8 +624,8 @@ export default class GameScene extends Phaser.Scene {
     }
 
     private resetJoystick(): void {
-        const joystickX = 80;
-        const joystickY = GAME_HEIGHT - 100;
+        const joystickX = 90;
+        const joystickY = GAME_HEIGHT - 110;
 
         this.joystickThumb.setPosition(joystickX, joystickY);
         this.joystickPointer = null;
@@ -558,26 +633,32 @@ export default class GameScene extends Phaser.Scene {
         this.joystickY = 0;
     }
 
+    /**
+     * MODIFICATION 4: Expanded chatbox - DOUBLE SIZE (500x380)
+     * - Supports 15 visible messages without truncation
+     * - Scrolls downward to show latest messages
+     */
     private createChatUI(): void {
         this.chatContainer = this.add.container(10, 10);
         this.chatContainer.setScrollFactor(0);
         this.chatContainer.setDepth(1000);
 
-        const chatBg = this.add.rectangle(0, 0, 250, 120, 0x000000, 0.5);
+        // DOUBLED chat area: 500x380 (was 320x220)
+        const chatBg = this.add.rectangle(0, 0, 500, 380, 0x000000, 0.7);
         chatBg.setOrigin(0, 0);
-        chatBg.setStrokeStyle(1, 0x444444);
+        chatBg.setStrokeStyle(2, 0x4ade80, 0.6);
         this.chatContainer.add(chatBg);
 
-        const title = this.add.text(10, 5, "Chat", {
-            font: "bold 11px Arial",
-            color: "#888888",
+        const title = this.add.text(10, 5, "Chat (15 messages)", {
+            font: "bold 14px Arial",
+            color: "#4ade80",
         });
         this.chatContainer.add(title);
 
         this.createChatInput();
 
         if (!this.isMobile) {
-            const instructions = this.add.text(10, GAME_HEIGHT - 20, "Press Enter to chat | Q/E: Attack | Shift: Guard", {
+            const instructions = this.add.text(10, GAME_HEIGHT - 20, "Enter: Chat | Q/E: Attack | Shift: Guard | WASD: Move", {
                 font: "11px Arial",
                 color: "#666666",
             });
@@ -595,22 +676,23 @@ export default class GameScene extends Phaser.Scene {
         this.chatInput = document.createElement("input");
         this.chatInput.type = "text";
         this.chatInput.placeholder = "Type message...";
-        this.chatInput.maxLength = 100;
+        this.chatInput.maxLength = 300;
         this.chatInput.style.cssText = `
             position: absolute;
-            width: 230px;
-            padding: 5px 8px;
-            font-size: 11px;
-            border: 1px solid #4ade80;
-            border-radius: 4px;
-            background: rgba(0, 0, 0, 0.8);
+            width: 480px;
+            padding: 8px 12px;
+            font-size: 13px;
+            border: 2px solid #4ade80;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.95);
             color: #ffffff;
             outline: none;
             display: none;
         `;
 
+        // Position below the expanded chat area (380px + 10px padding)
         this.chatInput.style.left = `${rect.left + 10 * scaleX}px`;
-        this.chatInput.style.top = `${rect.top + 135 * scaleY}px`;
+        this.chatInput.style.top = `${rect.top + 395 * scaleY}px`;
 
         document.body.appendChild(this.chatInput);
 
@@ -667,14 +749,21 @@ export default class GameScene extends Phaser.Scene {
         }
     }
 
+    /**
+     * MODIFICATION 4: Support 15 messages in expanded chatbox
+     */
     private addChatMessage(name: string, text: string, color: string): void {
         this.chatMessages.push({ name, text, color });
-        if (this.chatMessages.length > 4) {
+        // Keep up to 15 messages (was 8)
+        if (this.chatMessages.length > 15) {
             this.chatMessages.shift();
         }
         this.renderChatMessages();
     }
 
+    /**
+     * MODIFICATION 4: Render messages in expanded chatbox with scrolling
+     */
     private renderChatMessages(): void {
         this.chatContainer.each((child: Phaser.GameObjects.GameObject) => {
             if (child.getData("isMessage")) {
@@ -682,23 +771,31 @@ export default class GameScene extends Phaser.Scene {
             }
         });
 
-        this.chatMessages.forEach((msg, i) => {
-            const y = 20 + i * 22;
+        let yOffset = 25;
+        const maxHeight = 360; // Leave room for title and padding
 
-            const nameText = this.add.text(10, y, `${msg.name}:`, {
-                font: "bold 10px Arial",
+        this.chatMessages.forEach((msg) => {
+            // Skip rendering if we've exceeded the visible area
+            if (yOffset > maxHeight) return;
+
+            const nameText = this.add.text(10, yOffset, `${msg.name}:`, {
+                font: "bold 12px Arial",
                 color: msg.color,
             });
             nameText.setData("isMessage", true);
             this.chatContainer.add(nameText);
 
-            const msgText = this.add.text(15 + nameText.width, y, ` ${msg.text}`, {
-                font: "10px Arial",
+            // Wider word wrap for expanded chatbox (was 290, now 460)
+            const msgText = this.add.text(15 + nameText.width, yOffset, ` ${msg.text}`, {
+                font: "12px Arial",
                 color: "#ffffff",
-                wordWrap: { width: 220 - nameText.width },
+                wordWrap: { width: 460 - nameText.width },
             });
             msgText.setData("isMessage", true);
             this.chatContainer.add(msgText);
+
+            // Move to next line based on message height
+            yOffset += Math.max(msgText.height, 20) + 4;
         });
     }
 
@@ -731,6 +828,11 @@ export default class GameScene extends Phaser.Scene {
             this.multiplayer.onChatMessage((_playerId: string, name: string, text: string) => {
                 const color = this.getPlayerColor(name);
                 this.addChatMessage(name, text, color);
+            });
+
+            // MODIFICATION 2: Receive NPC chat from other players for synchronized experience
+            this.multiplayer.onNPCChatMessage((npcName: string, text: string, color: string) => {
+                this.addChatMessage(npcName, text, color);
             });
 
             await this.multiplayer.connect();
@@ -924,6 +1026,57 @@ export default class GameScene extends Phaser.Scene {
         }
 
         // Fallback: return original even if it's solid (better than NaN positions)
+        return { tileX: startTileX, tileY: startTileY };
+    }
+
+    /**
+     * MODIFICATION 1: Find walkable tile prioritizing UPWARD direction
+     * This ensures NPCs are placed above water/obstacles when possible
+     */
+    private findNearestWalkableTileUpward(
+        startTileX: number,
+        startTileY: number,
+        maxRadius: number
+    ): { tileX: number; tileY: number } {
+        // First check if starting position is already walkable
+        if (!this.generator.isSolidAtTile(startTileX, startTileY)) {
+            return { tileX: startTileX, tileY: startTileY };
+        }
+
+        // Search in expanding rings, but check UPWARD tiles first
+        for (let r = 1; r <= maxRadius; r++) {
+            // Priority 1: Check tiles directly above (negative Y = upward)
+            for (let dx = -r; dx <= r; dx++) {
+                const tx = startTileX + dx;
+                const ty = startTileY - r; // Upward first
+                if (!this.generator.isSolidAtTile(tx, ty)) {
+                    return { tileX: tx, tileY: ty };
+                }
+            }
+
+            // Priority 2: Check sides at this radius
+            for (let dy = -r + 1; dy <= r - 1; dy++) {
+                // Left side
+                if (!this.generator.isSolidAtTile(startTileX - r, startTileY + dy)) {
+                    return { tileX: startTileX - r, tileY: startTileY + dy };
+                }
+                // Right side
+                if (!this.generator.isSolidAtTile(startTileX + r, startTileY + dy)) {
+                    return { tileX: startTileX + r, tileY: startTileY + dy };
+                }
+            }
+
+            // Priority 3: Check tiles below (only as last resort)
+            for (let dx = -r; dx <= r; dx++) {
+                const tx = startTileX + dx;
+                const ty = startTileY + r; // Downward last
+                if (!this.generator.isSolidAtTile(tx, ty)) {
+                    return { tileX: tx, tileY: ty };
+                }
+            }
+        }
+
+        // Fallback: return original position
         return { tileX: startTileX, tileY: startTileY };
     }
 
