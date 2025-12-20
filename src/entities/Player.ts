@@ -15,6 +15,10 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private _isMoving: boolean = false;
   public playerName: string;
 
+  // Joystick input from external source (mobile)
+  public joystickX: number = 0;
+  public joystickY: number = 0;
+
   constructor(
     scene: Phaser.Scene,
     x: number,
@@ -59,13 +63,13 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     // Reset velocity
     body.setVelocity(0);
 
-    // Get input
+    // Get keyboard input
     const left = this.cursors?.left.isDown || this.wasd?.A.isDown;
     const right = this.cursors?.right.isDown || this.wasd?.D.isDown;
     const up = this.cursors?.up.isDown || this.wasd?.W.isDown;
     const down = this.cursors?.down.isDown || this.wasd?.S.isDown;
 
-    // Calculate velocity
+    // Calculate velocity from keyboard
     let velocityX = 0;
     let velocityY = 0;
 
@@ -74,10 +78,19 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     if (up) velocityY = -PLAYER_SPEED;
     if (down) velocityY = PLAYER_SPEED;
 
+    // Add joystick input (for mobile)
+    if (this.joystickX !== 0 || this.joystickY !== 0) {
+      velocityX = this.joystickX * PLAYER_SPEED;
+      velocityY = this.joystickY * PLAYER_SPEED;
+    }
+
     // Normalize diagonal movement
     if (velocityX !== 0 && velocityY !== 0) {
-      velocityX *= 0.707;
-      velocityY *= 0.707;
+      const magnitude = Math.sqrt(velocityX * velocityX + velocityY * velocityY);
+      if (magnitude > PLAYER_SPEED) {
+        velocityX = (velocityX / magnitude) * PLAYER_SPEED;
+        velocityY = (velocityY / magnitude) * PLAYER_SPEED;
+      }
     }
 
     body.setVelocity(velocityX, velocityY);
@@ -85,17 +98,6 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     // Update animation based on movement
     if (velocityX !== 0 || velocityY !== 0) {
       this._isMoving = true;
-
-      // Determine direction (prioritize last pressed)
-      if (left && this._currentDirection !== 'left') {
-        this._currentDirection = 'left';
-      } else if (right && this._currentDirection !== 'right') {
-        this._currentDirection = 'right';
-      } else if (up && this._currentDirection !== 'up') {
-        this._currentDirection = 'up';
-      } else if (down && this._currentDirection !== 'down') {
-        this._currentDirection = 'down';
-      }
 
       // Set walking direction based on velocity priority
       if (Math.abs(velocityX) > Math.abs(velocityY)) {

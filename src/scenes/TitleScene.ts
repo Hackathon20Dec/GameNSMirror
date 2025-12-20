@@ -17,8 +17,8 @@ export class TitleScene extends Phaser.Scene {
 
   create(): void {
     // Title
-    const title = this.add.text(GAME_WIDTH / 2, 80, 'Farm Life', {
-      font: 'bold 48px Arial',
+    const title = this.add.text(GAME_WIDTH / 2, 80, 'NetworkSimulation', {
+      font: 'bold 36px Arial',
       color: '#ffffff',
       stroke: '#2d5a27',
       strokeThickness: 6,
@@ -26,7 +26,7 @@ export class TitleScene extends Phaser.Scene {
     title.setOrigin(0.5);
 
     // Subtitle
-    const subtitle = this.add.text(GAME_WIDTH / 2, 130, 'Create Your Character', {
+    const subtitle = this.add.text(GAME_WIDTH / 2, 130, 'Choose Your Avatar', {
       font: '24px Arial',
       color: '#e0e0e0',
     });
