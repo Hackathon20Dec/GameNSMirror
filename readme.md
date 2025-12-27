@@ -11,4 +11,4 @@ creating stardew valley
 
 <!-- Down the line -->
 
-user(me):{landed:True}
+mchu-1 has landed! 🛬
