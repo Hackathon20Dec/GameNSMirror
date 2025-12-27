@@ -10,3 +10,5 @@ creating stardew valley
 - [ ] **Social UI:** users clickable → profile view; small header UI for a timeline of NS people; "bookface" directory-style view.
 
 <!-- Down the line -->
+
+user(me):{landed:True}
