@@ -1,12 +1,12 @@
-const OPENROUTER_API_KEY = import.meta.env.VITE_OPENROUTER_API_KEY || '';
-const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY || '';
+// Backend API URL - all AI calls go through the server now
+const API_BASE_URL = import.meta.env.VITE_SERVER_URL?.replace('wss://', 'https://').replace('ws://', 'http://') || 'http://localhost:3001';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
 }
 
-// ElevenLabs voice IDs for each character (using their pre-made voices)
+// ElevenLabs voice IDs for each character (used by backend)
 const VOICE_IDS: Record<string, string> = {
   balaji: 'ErXwobaYiN019PkySvjV', // Antoni - deep, thoughtful male
   jackson: 'VR6AewLTigWG4xSOukaG', // Arnold - friendly, warm male
@@ -14,7 +14,7 @@ const VOICE_IDS: Record<string, string> = {
   yash: 'pNInz6obpgDQGcFmaJgB', // Adam - clear, articulate male
 };
 
-// Fast character fallbacks
+// Fast character fallbacks (used if backend fails)
 const CHARACTER_FALLBACKS: Record<string, string[]> = {
   balaji: [
     "So, that's the wrong frame. Think bigger.",
@@ -47,7 +47,7 @@ let currentAudio: HTMLAudioElement | null = null;
 let lastPlayedMessage: string = '';
 
 /**
- * Play text as speech using ElevenLabs - STREAMING for low latency
+ * Play text as speech using backend TTS endpoint
  */
 export async function speakText(text: string, npcId: string): Promise<void> {
   // Prevent duplicate playback of same message
@@ -62,37 +62,24 @@ export async function speakText(text: string, npcId: string): Promise<void> {
     currentAudio = null;
   }
 
-  const voiceId = VOICE_IDS[npcId] || VOICE_IDS.jackson;
-
   try {
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
-      {
-        method: 'POST',
-        headers: {
-          'Accept': 'audio/mpeg',
-          'Content-Type': 'application/json',
-          'xi-api-key': ELEVENLABS_API_KEY,
-        },
-        body: JSON.stringify({
-          text: text,
-          model_id: 'eleven_turbo_v2_5', // Fastest model
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.75,
-            style: 0.5,
-            use_speaker_boost: true
-          }
-        }),
-      }
-    );
+    const response = await fetch(`${API_BASE_URL}/api/tts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: text,
+        npcId: npcId,
+      }),
+    });
 
     if (!response.ok) {
-      console.warn('ElevenLabs TTS failed:', response.status);
+      console.warn('TTS failed:', response.status);
       return;
     }
 
-    // Stream the audio
+    // Get audio blob from response
     const audioBlob = await response.blob();
     const audioUrl = URL.createObjectURL(audioBlob);
 
@@ -134,41 +121,28 @@ function getCharacterFallback(npcId?: string): string {
 }
 
 /**
- * Ultra-fast AI chat - optimized for <1 second response
+ * AI chat - calls backend API which uses OpenRouter
  */
 export async function chat(
   systemPrompt: string,
   messages: ChatMessage[],
   npcId?: string
 ): Promise<string> {
-  if (!OPENROUTER_API_KEY) {
-    return getCharacterFallback(npcId);
-  }
-
   try {
-    // AGGRESSIVE timeout - 3 seconds max
+    // Call backend API with timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const response = await fetch(`${API_BASE_URL}/api/chat`, {
       signal: controller.signal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': window.location.origin,
-        'X-Title': 'NetworkSim',
       },
       body: JSON.stringify({
-        // Use FASTEST models - Groq's llama is insanely fast
-        model: 'meta-llama/llama-3.2-3b-instruct:free',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...messages.slice(-4) // Only last 4 messages for speed
-        ],
-        max_tokens: 80, // Short responses = fast
-        temperature: 0.9,
-        top_p: 0.9,
+        systemPrompt,
+        messages,
+        npcId,
       }),
     });
 
@@ -179,15 +153,14 @@ export async function chat(
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content?.trim();
 
-    if (content && content.length > 0) {
-      return content;
+    if (data.response && data.response.length > 0) {
+      return data.response;
     }
 
-    throw new Error('Empty');
+    throw new Error('Empty response');
   } catch (error) {
-    console.warn('AI fast-path failed, using fallback:', error);
+    console.warn('AI chat failed, using fallback:', error);
     return getCharacterFallback(npcId);
   }
 }

@@ -7,6 +7,10 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
+// API Keys from environment
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
+
 app.use(cors());
 app.use(express.json());
 
@@ -16,6 +20,41 @@ const players = new Map();
 // Store action logs (last 1000)
 const actionLogs = [];
 const MAX_LOGS = 1000;
+
+// Character fallbacks for when API fails
+const CHARACTER_FALLBACKS = {
+  balaji: [
+    "So, that's the wrong frame. Think bigger.",
+    "That's legacy thinking. Let me reframe.",
+    "Interesting. But what are you building?",
+    "The pattern here is clear if you look.",
+  ],
+  jackson: [
+    "Oh I love that! Tell me more.",
+    "That resonates. What's the first step?",
+    "Haha okay, I see you. Keep going.",
+    "That's cool! What would make it work?",
+  ],
+  otavio: [
+    "Cool. What have you shipped though?",
+    "That's weak. What's the MVP?",
+    "Nah, be specific. What's the blocker?",
+    "Prove it. Show me data.",
+  ],
+  yash: [
+    "What's the constraint there?",
+    "Let's break that down. What's blocking you?",
+    "Interesting. What's the spec?",
+    "What would need to be true for that to work?",
+  ],
+};
+
+function getCharacterFallback(npcId) {
+  const fallbacks = npcId && CHARACTER_FALLBACKS[npcId.toLowerCase()]
+    ? CHARACTER_FALLBACKS[npcId.toLowerCase()]
+    : ["That's interesting. Tell me more."];
+  return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+}
 
 function addLog(log) {
   actionLogs.push({
@@ -46,6 +85,125 @@ function broadcastAll(message) {
   });
 }
 
+// ============================================
+// AI CHAT ENDPOINT - Uses OpenRouter API
+// ============================================
+app.post('/api/chat', async (req, res) => {
+  const { systemPrompt, messages, npcId } = req.body;
+
+  if (!OPENROUTER_API_KEY) {
+    console.warn('No OPENROUTER_API_KEY set, using fallback');
+    return res.json({ response: getCharacterFallback(npcId) });
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      signal: controller.signal,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': 'https://networksimulation.onrender.com',
+        'X-Title': 'NetworkSim',
+      },
+      body: JSON.stringify({
+        model: 'meta-llama/llama-3.2-3b-instruct:free',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...messages.slice(-4) // Only last 4 messages for speed
+        ],
+        max_tokens: 150,
+        temperature: 0.9,
+        top_p: 0.9,
+      }),
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`OpenRouter API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content?.trim();
+
+    if (content && content.length > 0) {
+      return res.json({ response: content });
+    }
+
+    throw new Error('Empty response from API');
+  } catch (error) {
+    console.warn('AI chat error, using fallback:', error.message);
+    return res.json({ response: getCharacterFallback(npcId) });
+  }
+});
+
+// ============================================
+// TEXT-TO-SPEECH ENDPOINT - Uses ElevenLabs
+// ============================================
+const VOICE_IDS = {
+  balaji: 'ErXwobaYiN019PkySvjV',
+  jackson: 'VR6AewLTigWG4xSOukaG',
+  otavio: 'TxGEqnHWrfWFTfGW9XjX',
+  yash: 'pNInz6obpgDQGcFmaJgB',
+};
+
+app.post('/api/tts', async (req, res) => {
+  const { text, npcId } = req.body;
+
+  if (!ELEVENLABS_API_KEY) {
+    return res.status(400).json({ error: 'TTS not configured' });
+  }
+
+  const voiceId = VOICE_IDS[npcId] || VOICE_IDS.jackson;
+
+  try {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
+      {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'Content-Type': 'application/json',
+          'xi-api-key': ELEVENLABS_API_KEY,
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: 'eleven_turbo_v2_5',
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.5,
+            use_speaker_boost: true
+          }
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`ElevenLabs error: ${response.status}`);
+    }
+
+    // Stream audio back to client
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Transfer-Encoding': 'chunked',
+    });
+
+    const arrayBuffer = await response.arrayBuffer();
+    res.send(Buffer.from(arrayBuffer));
+  } catch (error) {
+    console.warn('TTS error:', error.message);
+    res.status(500).json({ error: 'TTS failed' });
+  }
+});
+
+// ============================================
+// WEBSOCKET HANDLERS
+// ============================================
 wss.on('connection', (ws) => {
   let playerId = null;
 
@@ -168,6 +326,16 @@ wss.on('connection', (ws) => {
             });
           }
           break;
+
+        case 'npc-chat':
+          // Broadcast NPC responses to all players
+          broadcastAll({
+            type: 'npc-chat',
+            npcName: message.npcName,
+            text: message.text,
+            color: message.color
+          });
+          break;
       }
     } catch (err) {
       console.error('Message parse error:', err);
@@ -199,12 +367,16 @@ wss.on('connection', (ws) => {
   });
 });
 
-// REST endpoints
+// ============================================
+// REST ENDPOINTS
+// ============================================
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     players: players.size,
-    logs: actionLogs.length
+    logs: actionLogs.length,
+    aiConfigured: !!OPENROUTER_API_KEY,
+    ttsConfigured: !!ELEVENLABS_API_KEY
   });
 });
 
@@ -230,4 +402,6 @@ app.get('/logs', (req, res) => {
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`AI configured: ${!!OPENROUTER_API_KEY}`);
+  console.log(`TTS configured: ${!!ELEVENLABS_API_KEY}`);
 });
