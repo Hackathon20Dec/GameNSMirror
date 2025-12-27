@@ -7,9 +7,9 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-// API Keys from environment
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
+// API Keys from environment (support both VITE_ and non-VITE_ versions)
+const OPENROUTER_API_KEY = process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY || '';
+const ELEVENLABS_API_KEY = process.env.VITE_ELEVENLABS_API_KEY || process.env.ELEVENLABS_API_KEY || '';
 
 app.use(cors());
 app.use(express.json());
