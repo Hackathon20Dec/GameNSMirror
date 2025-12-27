@@ -7,7 +7,7 @@ import {
     SPRITESHEET_FRAME_SIZE,
     TILE_SIZE,
 } from "../constants";
-import WorldGenerator, { TerrainType } from "../world/WorldGenerator";
+import WorldGenerator, { TerrainType, DEFAULT_ISLAND_CONFIG } from "../world/WorldGenerator";
 import WorldChunkBuilder, {
     NpcIdleVariant,
 } from "./builders/WorldChunkBuilder";
@@ -118,8 +118,9 @@ export default class GameScene extends Phaser.Scene {
     private npcInteractionRadius: number = 100;
     private _talkingToNPC: boolean = false;
 
-    // Player skin system - random skin based on gender with directional animations
+    // Player skin system - selected skin based on gender with directional animations
     private playerSkinKey: string = "";
+    private playerSkinIndex: number = 1;
     private playerDirection: "down" | "left" | "right" | "up" = "down";
 
     // Skin definitions - 10 skins per gender
@@ -138,6 +139,10 @@ export default class GameScene extends Phaser.Scene {
         if (data.player) {
             this.playerName = data.player.name;
             this.playerGender = data.player.gender;
+            this.playerSkinIndex = data.player.skinIndex || 1;
+            // Set the skin key based on selected gender and skin index
+            const skinNum = String(this.playerSkinIndex).padStart(2, "0");
+            this.playerSkinKey = `guest_${this.playerGender}_${skinNum}`;
         }
     }
 
@@ -283,35 +288,31 @@ export default class GameScene extends Phaser.Scene {
             }
         }
 
-        // Player sprite: Tiny Swords Warrior
-        this.unitStrips.ensureStripFrames(TEX_PLAYER_IDLE);
-        const playerScale = 0.4;
+        // Player sprite: Use selected character skin (4x4 spritesheet with directional animations)
+        // Fallback to default skin if not set
+        if (!this.playerSkinKey) {
+            this.playerSkinKey = "guest_male_01";
+        }
+
+        // Player scale for 128x128 frame skins
+        const playerScale = 0.5;
 
         this.player = this.add
-            .sprite(0, 0, TEX_PLAYER_IDLE, "f0")
+            .sprite(0, 0, this.playerSkinKey, 0)
             .setScale(playerScale)
             .setOrigin(0.5, 0.85) // foot-ish anchor for top-down movement feel
             .setDepth(2);
 
-        this.player.setFlipX(false); // default right
-        this.player.play(ANIM_PLAYER_IDLE, true);
+        this.player.setFlipX(false);
+        // Start with idle down animation for the selected skin
+        this.player.play(`${this.playerSkinKey}_idle_down`, true);
+        this.playerDirection = "down";
 
         // Ensure the player starts on walkable land (important now that WATER is solid).
         this.placePlayerAtSafeSpawn();
 
-        // When attack animation finishes, return to guard/run/idle depending on input
-        this.player.on(
-            Phaser.Animations.Events.ANIMATION_COMPLETE,
-            (anim: Phaser.Animations.Animation) => {
-                if (
-                    anim.key === ANIM_PLAYER_ATTACK1 ||
-                    anim.key === ANIM_PLAYER_ATTACK2
-                ) {
-                    this.playerActionLocked = false;
-                    this.refreshPlayerLocomotionAnimation();
-                }
-            }
-        );
+        // When walk animation completes a cycle, we can check for direction changes
+        // (For skin-based characters, we use walk animations that loop indefinitely)
 
         // Camera follow
         this.cameras.main.startFollow(this.player);
@@ -415,36 +416,28 @@ export default class GameScene extends Phaser.Scene {
     // --- AI NPC Methods ---
 
     /**
-     * NPCs spawn at FIXED WORLD POSITIONS (constant across sessions)
-     * - All 4 NPCs positioned ABOVE the river (negative Y = upward)
-     * - Evenly spread across the upper portion of the map
-     * - Uses deterministic walkable tile search that prioritizes upward tiles
+     * NPCs spawn CLOSE TO PLAYER SPAWN for immediate interaction
+     * Positioned in a semicircle around the spawn point so players meet them right away
      */
     private spawnAINPCs(): void {
-        // FIXED world coordinates for each NPC - evenly spread ABOVE river
-        // All NPCs are in negative Y territory (above player spawn area)
-        // Spread across a wide horizontal range for even distribution
-        const FIXED_NPC_POSITIONS = [
-            { id: 'balaji', x: -200, y: -180 },   // Balaji - far upper-left
-            { id: 'jackson', x: 200, y: -180 },   // Jackson - far upper-right
-            { id: 'otavio', x: -80, y: -280 },    // Otavio - center-left, further up
-            { id: 'yash', x: 80, y: -280 },       // Yash - center-right, further up
+        const cfg = DEFAULT_ISLAND_CONFIG;
+
+        // Player spawns at island center - position NPCs in a close semicircle
+        const spawnX = cfg.centerX * TILE_SIZE;
+        const spawnY = cfg.centerY * TILE_SIZE;
+        const npcRadius = 80; // Close enough for immediate interaction
+
+        // NPCs positioned around spawn point - semi-circle formation
+        const NPC_POSITIONS = [
+            { id: 'balaji', x: spawnX - npcRadius, y: spawnY - 40 },      // Upper left
+            { id: 'jackson', x: spawnX + npcRadius, y: spawnY - 40 },     // Upper right
+            { id: 'otavio', x: spawnX - npcRadius - 20, y: spawnY + 60 }, // Lower left
+            { id: 'yash', x: spawnX + npcRadius + 20, y: spawnY + 60 },   // Lower right
         ];
 
         NPC_CHARACTERS.forEach((character, index) => {
-            const fixedPos = FIXED_NPC_POSITIONS[index];
-
-            // Use fixed world coordinates (not relative to player)
-            const targetTileX = Math.floor(fixedPos.x / TILE_SIZE);
-            const targetTileY = Math.floor(fixedPos.y / TILE_SIZE);
-
-            // Find nearest walkable tile, prioritizing UPWARD direction
-            // This ensures NPCs are NEVER placed below (positive Y) the target
-            const safe = this.findNearestWalkableTileUpward(targetTileX, targetTileY, 80);
-            const npcX = (safe.tileX + 0.5) * TILE_SIZE;
-            const npcY = (safe.tileY + 0.5) * TILE_SIZE;
-
-            const npc = new AINPC(this, npcX, npcY, character);
+            const pos = NPC_POSITIONS[index];
+            const npc = new AINPC(this, pos.x, pos.y, character);
 
             // Broadcast NPC messages to all players via multiplayer
             npc.setOnChat((name, text, color) => {
@@ -541,23 +534,25 @@ export default class GameScene extends Phaser.Scene {
         this.joystickThumb.setScrollFactor(0);
         this.joystickThumb.setDepth(1000);
 
-        // Attack button (bottom-right area)
-        const attackBtn = this.add.circle(GAME_WIDTH - 70, GAME_HEIGHT - 80, 35, 0xe53935, 0.7);
-        attackBtn.setStrokeStyle(3, 0xffffff, 0.5);
-        attackBtn.setScrollFactor(0);
-        attackBtn.setDepth(999);
-        attackBtn.setInteractive();
+        // Interaction button (bottom-right area) - for talking to NPCs
+        const interactBtn = this.add.circle(GAME_WIDTH - 70, GAME_HEIGHT - 80, 35, 0x4ade80, 0.7);
+        interactBtn.setStrokeStyle(3, 0xffffff, 0.5);
+        interactBtn.setScrollFactor(0);
+        interactBtn.setDepth(999);
+        interactBtn.setInteractive();
 
-        const attackIcon = this.add.text(GAME_WIDTH - 70, GAME_HEIGHT - 80, "⚔️", {
+        const interactIcon = this.add.text(GAME_WIDTH - 70, GAME_HEIGHT - 80, "💬", {
             font: "28px Arial",
         });
-        attackIcon.setOrigin(0.5);
-        attackIcon.setScrollFactor(0);
-        attackIcon.setDepth(1000);
+        interactIcon.setOrigin(0.5);
+        interactIcon.setScrollFactor(0);
+        interactIcon.setDepth(1000);
 
-        attackBtn.on("pointerdown", () => {
-            if (!this.playerActionLocked) {
-                this.startPlayerAttack("attack1");
+        interactBtn.on("pointerdown", () => {
+            // Open chat input for NPC interaction
+            if (this.nearbyNPC) {
+                this.chatInput.style.display = "block";
+                this.chatInput.focus();
             }
         });
 
@@ -920,37 +915,44 @@ export default class GameScene extends Phaser.Scene {
             moveY = this.joystickY;
         }
 
-        // Facing (left/right flip). Default right, keep last when moving only vertically.
-        if (moveX !== 0) {
-            this.playerFacingX = moveX > 0 ? 1 : -1;
-        }
-        this.player.setFlipX(this.playerFacingX < 0);
+        // Determine direction for 4-directional animations
+        const isMoving = moveX !== 0 || moveY !== 0;
+        let newDirection = this.playerDirection;
 
-        const wantGuard = this.keyShift.isDown;
-        const wantAttack1 = Phaser.Input.Keyboard.JustDown(this.keyQ);
-        const wantAttack2 = Phaser.Input.Keyboard.JustDown(this.keyE);
-
-        // Actions
-        if (!this.playerActionLocked) {
-            if (wantAttack1) {
-                this.startPlayerAttack("attack1");
-            } else if (wantAttack2) {
-                this.startPlayerAttack("attack2");
+        if (isMoving) {
+            // Determine primary direction based on largest movement component
+            if (Math.abs(moveX) > Math.abs(moveY)) {
+                newDirection = moveX > 0 ? "right" : "left";
             } else {
-                // Locomotion/guard state selection
-                if (wantGuard) {
-                    this.applyPlayerState("guard");
-                } else if (moveX !== 0 || moveY !== 0) {
-                    this.applyPlayerState("run");
-                } else {
-                    this.applyPlayerState("idle");
-                }
+                newDirection = moveY > 0 ? "down" : "up";
             }
         }
 
-        // Movement is blocked while guarding or during attacks
-        const allowMove = !this.playerActionLocked && !wantGuard;
-        const isMoving = moveX !== 0 || moveY !== 0;
+        // Update direction and animation if changed or movement state changed
+        const wasMoving = this.playerState === "run";
+        const directionChanged = newDirection !== this.playerDirection;
+        const movingStateChanged = isMoving !== wasMoving;
+
+        if (directionChanged || movingStateChanged) {
+            this.playerDirection = newDirection;
+
+            if (isMoving) {
+                // Play walk animation for current direction
+                this.player.play(`${this.playerSkinKey}_walk_${this.playerDirection}`, true);
+                this.playerState = "run";
+            } else {
+                // Play idle animation for current direction
+                this.player.play(`${this.playerSkinKey}_idle_${this.playerDirection}`, true);
+                this.playerState = "idle";
+            }
+        }
+
+        // Update facing for compatibility with multiplayer direction broadcasting
+        if (moveX !== 0) {
+            this.playerFacingX = moveX > 0 ? 1 : -1;
+        }
+
+        const allowMove = true;
 
         if (allowMove) {
             const len = Math.hypot(moveX, moveY);
@@ -1081,11 +1083,13 @@ export default class GameScene extends Phaser.Scene {
     }
 
     private placePlayerAtSafeSpawn(): void {
-        const startTileX = 0;
-        const startTileY = 0;
+        // For island mode, spawn on the main path area (center of island)
+        const cfg = DEFAULT_ISLAND_CONFIG;
+        const startTileX = cfg.centerX;
+        const startTileY = cfg.centerY; // Spawn near center of the island on the path
 
-        // Large enough to escape an unlucky ocean-at-origin seed without noticeable cost.
-        const maxRadiusTiles = 220;
+        // Still do a safety check in case spawn tile is occupied
+        const maxRadiusTiles = 20;
 
         const safe = this.findNearestWalkableTile(
             startTileX,
@@ -1100,47 +1104,18 @@ export default class GameScene extends Phaser.Scene {
     }
 
     // -----------------------------
-    // Player animation state
+    // Player animation state (skin-based directional animations)
     // -----------------------------
 
-    private applyPlayerState(state: PlayerAnimState): void {
-        this.playerState = state;
-
-        let animKey = ANIM_PLAYER_IDLE;
-
-        if (state === "run") animKey = ANIM_PLAYER_RUN;
-        else if (state === "guard") animKey = ANIM_PLAYER_GUARD;
-        else if (state === "attack1") animKey = ANIM_PLAYER_ATTACK1;
-        else if (state === "attack2") animKey = ANIM_PLAYER_ATTACK2;
-
+    /**
+     * Play skin-based animation for current direction
+     * Skins have: idle_down, idle_up, idle_left, idle_right, walk_down, walk_up, walk_left, walk_right
+     */
+    private playDirectionalAnimation(isMoving: boolean): void {
+        const animType = isMoving ? "walk" : "idle";
+        const animKey = `${this.playerSkinKey}_${animType}_${this.playerDirection}`;
         this.player.play(animKey, true);
-    }
-
-    private startPlayerAttack(which: "attack1" | "attack2"): void {
-        this.playerActionLocked = true;
-        this.applyPlayerState(which);
-    }
-
-    private refreshPlayerLocomotionAnimation(): void {
-        if (this.playerActionLocked) return;
-
-        const wantGuard = this.keyShift?.isDown ?? false;
-
-        const moving =
-            (this.keyW?.isDown ?? false) ||
-            (this.keyA?.isDown ?? false) ||
-            (this.keyS?.isDown ?? false) ||
-            (this.keyD?.isDown ?? false) ||
-            this.joystickX !== 0 ||
-            this.joystickY !== 0;
-
-        if (wantGuard) {
-            this.applyPlayerState("guard");
-        } else if (moving) {
-            this.applyPlayerState("run");
-        } else {
-            this.applyPlayerState("idle");
-        }
+        this.playerState = isMoving ? "run" : "idle";
     }
 
     // -----------------------------

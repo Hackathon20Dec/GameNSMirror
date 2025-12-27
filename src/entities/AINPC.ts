@@ -1,8 +1,64 @@
 import Phaser from 'phaser';
-import { chat, ChatMessage } from '../lib/ai';
+import { chat, ChatMessage, speakText, stopSpeaking } from '../lib/ai';
 import { NPCCharacter } from '../data/npcCharacters';
 
 type Direction = 'down' | 'left' | 'right' | 'up';
+type Mood = 'curious' | 'excited' | 'thoughtful' | 'challenging' | 'welcoming';
+
+/**
+ * Dynamic greetings - sound like REAL people, not NPCs
+ */
+const DYNAMIC_GREETINGS: Record<string, { first: string[]; returning: string[] }> = {
+  balaji: {
+    first: [
+      "So, you made it here. Most people don't. What do you want to know?",
+      "Interesting. New face. Are you here to build something or just asking questions?",
+      "Hey. I'm Balaji. Fair warning - I don't do small talk. What's on your mind?",
+    ],
+    returning: [
+      "You're back. Good. What have you been thinking about since we talked?",
+      "So, any progress? Or still processing?",
+      "Alright, round two. What's the question?",
+    ],
+  },
+  jackson: {
+    first: [
+      "Yo! New face! I'm Jackson - welcome to the network. What's your story?",
+      "Hey hey! Love meeting new people. I'm Jackson. What brings you here?",
+      "Oh nice! Fresh energy. I'm Jackson - I basically live to connect cool people. Who are you?",
+    ],
+    returning: [
+      "Hey you're back! How's it going? Been thinking about anything interesting?",
+      "Yooo welcome back! What's new in your world?",
+      "Hey friend! Good to see you. What's on your mind?",
+    ],
+  },
+  otavio: {
+    first: [
+      "New person. What have you shipped lately? And don't say 'ideas.'",
+      "Hey. I'm Otavio. Quick question - are you a builder or a talker?",
+      "Alright, new face. Impress me. What are you working on?",
+    ],
+    returning: [
+      "You're back. Did you actually do something since last time, or just think about it?",
+      "Round two. Show me progress.",
+      "Alright, what did you ship? Don't tell me 'nothing.'",
+    ],
+  },
+  yash: {
+    first: [
+      "Hey! I'm Yash. Quick question - what's the thing that's blocking you right now?",
+      "Welcome! I love helping people figure out their bottlenecks. What's yours?",
+      "Hey there! I'm Yash. Tell me - what are you trying to optimize?",
+    ],
+    returning: [
+      "Hey you're back! Any new constraints to work through?",
+      "Welcome back! What's the current bottleneck?",
+      "Good to see you! What needs unblocking today?",
+    ],
+  },
+};
+
 
 export class AINPC extends Phaser.GameObjects.Container {
   private sprite: Phaser.GameObjects.Sprite;
@@ -20,6 +76,10 @@ export class AINPC extends Phaser.GameObjects.Container {
   private conversationHistory: ChatMessage[] = [];
   private isTyping: boolean = false;
   private playerInRange: boolean = false;
+  private hasMetPlayer: boolean = false;
+  private currentMood: Mood = 'welcoming';
+  private lastInteractionTime: number = 0;
+  private idleTime: number = 0;
 
   private currentDirection: Direction = 'down';
   private playerX: number = 0;
@@ -89,20 +149,41 @@ export class AINPC extends Phaser.GameObjects.Container {
   }
 
   setPlayerInRange(inRange: boolean): void {
-    if (this.playerInRange !== inRange) {
-      this.playerInRange = inRange;
-      this.interactionPrompt.setVisible(inRange);
+    const wasInRange = this.playerInRange;
+    this.playerInRange = inRange;
+    this.interactionPrompt.setVisible(inRange);
 
-      // Greet player when they enter range for the first time
-      if (inRange && this.conversationHistory.length === 0) {
-        this.showMessage(this.greeting);
-        this.conversationHistory.push({
-          role: 'assistant',
-          content: this.greeting
-        });
-      }
+    // Stop speaking when player leaves
+    if (!inRange && wasInRange) {
+      stopSpeaking();
+    }
+
+    // Only greet when player ENTERS range (not already in range)
+    if (inRange && !wasInRange && !this.isTyping) {
+      // Get dynamic greeting based on whether we've met before
+      const dynamicGreeting = this.getDynamicGreeting();
+      this.showMessage(dynamicGreeting);
+      this.conversationHistory.push({
+        role: 'assistant',
+        content: dynamicGreeting
+      });
+      this.hasMetPlayer = true;
+      this.lastInteractionTime = Date.now();
+      this.idleTime = 0;
     }
   }
+
+  /**
+   * Get a contextual greeting based on whether this is first meeting or returning
+   */
+  private getDynamicGreeting(): string {
+    const greetings = DYNAMIC_GREETINGS[this.npcId];
+    if (!greetings) return this.greeting;
+
+    const pool = this.hasMetPlayer ? greetings.returning : greetings.first;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
 
   isInRange(): boolean {
     return this.playerInRange;
@@ -116,6 +197,7 @@ export class AINPC extends Phaser.GameObjects.Container {
     if (this.isTyping) return;
 
     this.isTyping = true;
+    this.lastInteractionTime = Date.now();
 
     // Add player message to history
     this.conversationHistory.push({
@@ -123,12 +205,15 @@ export class AINPC extends Phaser.GameObjects.Container {
       content: playerMessage
     });
 
-    // Show typing indicator
-    this.showMessage('...');
+    // Show typing indicator (don't speak this)
+    this.showMessage('...', false);
 
     try {
-      // Get AI response
-      const response = await chat(this.systemPrompt, this.conversationHistory);
+      // Build enhanced system prompt with conversation context
+      const enhancedPrompt = this.buildEnhancedPrompt();
+
+      // Get AI response with NPC ID for character-specific fallbacks
+      const response = await chat(enhancedPrompt, this.conversationHistory, this.npcId);
 
       // Add to history
       this.conversationHistory.push({
@@ -139,19 +224,58 @@ export class AINPC extends Phaser.GameObjects.Container {
       // Show response
       this.showMessage(response);
 
+      // Update mood based on conversation
+      this.updateMood(playerMessage);
+
       // Keep conversation history manageable (last 10 exchanges)
       if (this.conversationHistory.length > 20) {
         this.conversationHistory = this.conversationHistory.slice(-20);
       }
     } catch (error) {
       console.error('NPC response error:', error);
-      this.showMessage("Hmm, let me think about that...");
+      // Use character-specific fallback even in error case
+      const fallback = await chat(this.systemPrompt, [], this.npcId);
+      this.showMessage(fallback);
     }
 
     this.isTyping = false;
   }
 
-  private showMessage(text: string): void {
+  /**
+   * Build enhanced prompt - keep it simple and authentic
+   */
+  private buildEnhancedPrompt(): string {
+    const msgCount = Math.ceil(this.conversationHistory.length / 2);
+
+    // Simple context injection
+    let context = '';
+    if (msgCount > 3) {
+      context = "\n\nNote: You've been chatting for a bit now. Feel free to be more direct/casual.";
+    }
+
+    return `${this.systemPrompt}${context}
+
+IMPORTANT: Respond naturally in 1-3 sentences like you're actually texting. No essays. Sound human.`;
+  }
+
+  /**
+   * Update mood based on player's message - affects NPC's response tone
+   */
+  private updateMood(playerMessage: string): void {
+    const msg = playerMessage.toLowerCase();
+
+    if (msg.includes('?')) {
+      this.currentMood = 'curious';
+    } else if (msg.includes('!') || msg.includes('awesome') || msg.includes('cool')) {
+      this.currentMood = 'excited';
+    } else if (msg.includes('but') || msg.includes('disagree') || msg.includes('no')) {
+      this.currentMood = 'challenging';
+    } else {
+      this.currentMood = 'welcoming';
+    }
+  }
+
+  private showMessage(text: string, speak: boolean = true): void {
     // Send to chat UI
     if (this.onChatCallback) {
       this.onChatCallback(this.npcName, text, this.npcColor);
@@ -159,6 +283,12 @@ export class AINPC extends Phaser.GameObjects.Container {
 
     // Also show speech bubble above NPC
     this.showSpeechBubble(text);
+
+    // Speak with ElevenLabs - but NOT for typing indicators
+    const isTypingIndicator = text === '...' || text.includes('processing') || text.includes('thinking') || text.includes('analyzing');
+    if (speak && !isTypingIndicator && text.length > 3) {
+      speakText(text, this.npcId);
+    }
   }
 
   private showSpeechBubble(text: string): void {

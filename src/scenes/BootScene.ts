@@ -2,36 +2,28 @@ import Phaser from 'phaser';
 
 const GAME_WIDTH = 800;
 const GAME_HEIGHT = 600;
+const MIN_LOADING_TIME = 4000; // 4 seconds loading bar
 
 export default class BootScene extends Phaser.Scene {
+  private loadingStartTime: number = 0;
+  private assetsLoaded: boolean = false;
+  private bg: Phaser.GameObjects.Image | null = null;
+
   constructor() {
     super({ key: 'BootScene' });
   }
 
   preload(): void {
-    // Create loading bar
-    const progressBar = this.add.graphics();
-    const progressBox = this.add.graphics();
-    progressBox.fillStyle(0x222222, 0.8);
-    progressBox.fillRect(GAME_WIDTH / 2 - 160, GAME_HEIGHT / 2 - 25, 320, 50);
+    this.loadingStartTime = Date.now();
 
-    const loadingText = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 50, 'Loading...', {
-      font: '20px monospace',
-      color: '#ffffff',
-    });
-    loadingText.setOrigin(0.5, 0.5);
+    // Set background color matching the loading screen sky
+    this.cameras.main.setBackgroundColor('#5ba3d0');
 
-    // Update progress bar
-    this.load.on('progress', (value: number) => {
-      progressBar.clear();
-      progressBar.fillStyle(0x4ade80, 1);
-      progressBar.fillRect(GAME_WIDTH / 2 - 150, GAME_HEIGHT / 2 - 15, 300 * value, 30);
-    });
+    // Load the loading screen image first
+    this.load.image('loading_bg', 'assets/loading_screen.png');
 
     this.load.on('complete', () => {
-      progressBar.destroy();
-      progressBox.destroy();
-      loadingText.destroy();
+      this.assetsLoaded = true;
     });
 
     // Try to load assets (will generate fallbacks if they fail)
@@ -61,9 +53,91 @@ export default class BootScene extends Phaser.Scene {
       frameWidth: 128,
       frameHeight: 128,
     });
+
+    // Load player character skins (10 male + 10 female)
+    // 4x4 spritesheets: 512x512 total, 128x128 per frame
+    for (let i = 1; i <= 10; i++) {
+      const num = String(i).padStart(2, '0');
+      this.load.spritesheet(`guest_male_${num}`, `assets/PlayCharacters/guest_male_${num}_preview.png`, {
+        frameWidth: 128,
+        frameHeight: 128,
+      });
+      this.load.spritesheet(`guest_female_${num}`, `assets/PlayCharacters/guest_female_${num}_preview.png`, {
+        frameWidth: 128,
+        frameHeight: 128,
+      });
+    }
   }
 
   create(): void {
+    const width = this.scale.width;
+    const height = this.scale.height;
+
+    // Show loading background image - fill the entire screen
+    if (this.textures.exists('loading_bg')) {
+      this.bg = this.add.image(width / 2, height / 2, 'loading_bg');
+      this.fitBackground();
+      this.bg.setDepth(-1);
+    }
+
+    // Handle window resize
+    this.scale.on('resize', this.handleResize, this);
+
+    // Create single loading bar
+    const barX = width / 2;
+    const barY = height - 80;
+    const barWidth = 280;
+    const barHeight = 20;
+
+    // Loading text
+    const loadingLabel = this.add.text(barX, barY - 35, 'LOADING...', {
+      font: 'bold 16px Arial',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 4,
+    });
+    loadingLabel.setOrigin(0.5);
+
+    // Progress bar background
+    const progressBg = this.add.graphics();
+    progressBg.fillStyle(0x5c2e2e, 1);
+    progressBg.fillRoundedRect(barX - barWidth / 2, barY, barWidth, barHeight, 5);
+    progressBg.lineStyle(3, 0x000000, 0.6);
+    progressBg.strokeRoundedRect(barX - barWidth / 2, barY, barWidth, barHeight, 5);
+
+    // Progress bar fill
+    const progressFill = this.add.graphics();
+
+    // Calculate loading time
+    const elapsed = Date.now() - this.loadingStartTime;
+    const remainingTime = Math.max(1000, MIN_LOADING_TIME - elapsed);
+
+    // Animate progress bar fill
+    this.tweens.addCounter({
+      from: 0,
+      to: 100,
+      duration: remainingTime,
+      ease: 'Sine.easeInOut',
+      onUpdate: (tween: Phaser.Tweens.Tween) => {
+        const value = (tween.getValue() ?? 0) / 100;
+        progressFill.clear();
+        progressFill.fillStyle(0xcd5c5c, 1);
+        const fillWidth = (barWidth - 6) * value;
+        if (fillWidth > 0) {
+          progressFill.fillRoundedRect(barX - barWidth / 2 + 3, barY + 3, fillWidth, barHeight - 6, 3);
+        }
+      },
+      onComplete: () => {
+        // Hide loading bar elements
+        loadingLabel.destroy();
+        progressBg.destroy();
+        progressFill.destroy();
+
+        // Show ENTER button with floating effect
+        this.showEnterButton(barX, barY);
+      }
+    });
+
     // Generate procedural sprites if assets failed to load
     if (!this.textures.exists('player_male') || this.textures.get('player_male').key === '__MISSING') {
       this.generateCharacterSprite('player_male', 0x4a90d9); // Blue for male
@@ -82,7 +156,104 @@ export default class BootScene extends Phaser.Scene {
     this.createNPCAnimations('npc_otavio');
     this.createNPCAnimations('npc_yash');
 
-    this.scene.start('TitleScene');
+    // Create player skin animations (same layout as NPCs)
+    for (let i = 1; i <= 10; i++) {
+      const num = String(i).padStart(2, '0');
+      this.createNPCAnimations(`guest_male_${num}`);
+      this.createNPCAnimations(`guest_female_${num}`);
+    }
+
+    // Note: Scene transition is handled by the ENTER button
+  }
+
+  private fitBackground(): void {
+    if (!this.bg) return;
+    const width = this.scale.width;
+    const height = this.scale.height;
+
+    // Scale to cover the entire screen while maintaining aspect ratio
+    const scaleX = width / this.bg.width;
+    const scaleY = height / this.bg.height;
+    const scale = Math.max(scaleX, scaleY);
+
+    this.bg.setScale(scale);
+    this.bg.setPosition(width / 2, height / 2);
+  }
+
+  private handleResize(): void {
+    this.fitBackground();
+  }
+
+  private showEnterButton(x: number, y: number): void {
+    // Create button container
+    const buttonBg = this.add.graphics();
+    const buttonWidth = 180;
+    const buttonHeight = 50;
+
+    // Draw button background
+    buttonBg.fillStyle(0x2d5a27, 1);
+    buttonBg.fillRoundedRect(x - buttonWidth / 2, y - buttonHeight / 2, buttonWidth, buttonHeight, 10);
+    buttonBg.lineStyle(3, 0x1a3518, 1);
+    buttonBg.strokeRoundedRect(x - buttonWidth / 2, y - buttonHeight / 2, buttonWidth, buttonHeight, 10);
+
+    // Button text
+    const buttonText = this.add.text(x, y, 'ENTER', {
+      font: 'bold 24px Georgia, serif',
+      color: '#ffffff',
+      stroke: '#1a3518',
+      strokeThickness: 2,
+    });
+    buttonText.setOrigin(0.5);
+
+    // Create invisible interactive zone
+    const hitArea = this.add.rectangle(x, y, buttonWidth, buttonHeight, 0x000000, 0);
+    hitArea.setInteractive({ useHandCursor: true });
+
+    // Floating animation
+    this.tweens.add({
+      targets: [buttonBg, buttonText],
+      y: '-=8',
+      duration: 1200,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+    });
+
+    // Sync hit area with floating
+    this.tweens.add({
+      targets: hitArea,
+      y: y - 8,
+      duration: 1200,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+    });
+
+    // Hover effects
+    hitArea.on('pointerover', () => {
+      buttonBg.clear();
+      buttonBg.fillStyle(0x3a7233, 1);
+      buttonBg.fillRoundedRect(x - buttonWidth / 2, buttonBg.y - buttonHeight / 2, buttonWidth, buttonHeight, 10);
+      buttonBg.lineStyle(3, 0x2d5a27, 1);
+      buttonBg.strokeRoundedRect(x - buttonWidth / 2, buttonBg.y - buttonHeight / 2, buttonWidth, buttonHeight, 10);
+    });
+
+    hitArea.on('pointerout', () => {
+      buttonBg.clear();
+      buttonBg.fillStyle(0x2d5a27, 1);
+      buttonBg.fillRoundedRect(x - buttonWidth / 2, buttonBg.y - buttonHeight / 2, buttonWidth, buttonHeight, 10);
+      buttonBg.lineStyle(3, 0x1a3518, 1);
+      buttonBg.strokeRoundedRect(x - buttonWidth / 2, buttonBg.y - buttonHeight / 2, buttonWidth, buttonHeight, 10);
+    });
+
+    // Click to enter
+    hitArea.on('pointerdown', () => {
+      // Fade out and transition
+      this.cameras.main.fadeOut(500, 0, 0, 0);
+      this.cameras.main.once('camerafadeoutcomplete', () => {
+        this.scene.start('TitleScene');
+      });
+    });
   }
 
   private generateCharacterSprite(key: string, color: number): void {

@@ -479,9 +479,47 @@ function createSeededNoise2D(seed: string): Noise2D {
     return (x: number, y: number) => inst.noise2D(x, y);
 }
 
+export interface IslandConfig {
+    enabled: boolean;
+    centerX: number;      // Island center in tiles
+    centerY: number;
+    // Island dimensions - the shape is custom, not a simple ellipse
+    topWidth: number;     // Width at the top (building area)
+    bottomWidth: number;  // Width at the bottom (dock area)
+    height: number;       // Total height of island
+    beachWidth: number;   // Beach/sand width in tiles
+    pathWidth: number;    // Dirt path width
+    // Building locations (in tiles, relative to center)
+    buildings: { type: 'CASTLE' | 'HOUSE' | 'OUTPOST'; x: number; y: number }[];
+    // Dock location
+    dockX: number;
+    dockY: number;
+}
+
+export const DEFAULT_ISLAND_CONFIG: IslandConfig = {
+    enabled: true,
+    centerX: 0,
+    centerY: 0,
+    topWidth: 50,         // Wide at top for buildings
+    bottomWidth: 12,      // Narrow at bottom for dock
+    height: 40,           // Total height
+    beachWidth: 3,
+    pathWidth: 2,
+    buildings: [
+        { type: 'CASTLE', x: -18, y: -12 },   // Library (left) - larger building
+        { type: 'HOUSE', x: 0, y: -12 },       // Cafe (center)
+        { type: 'OUTPOST', x: 16, y: -12 },   // Gym (right)
+    ],
+    dockX: 0,
+    dockY: 28,
+};
+
 export default class WorldGenerator {
     private readonly _seed: string;
     private readonly seedHash: number;
+
+    // Island mode configuration
+    private readonly islandConfig: IslandConfig;
 
     // ---- Noise fields (reworked worldgen) ----
     private readonly continentNoise: Noise2D;
@@ -494,6 +532,9 @@ export default class WorldGenerator {
     private readonly riverNoise: Noise2D;
     private readonly riverWarpNoiseX: Noise2D;
     private readonly riverWarpNoiseY: Noise2D;
+
+    // Island edge noise for organic coastline
+    private readonly coastlineNoise: Noise2D;
 
     // Large landmasses + large oceans
     private readonly continentScale = 0.006;
@@ -512,12 +553,13 @@ export default class WorldGenerator {
     private readonly riverWarpScale = 0.02;
     private readonly riverWarpAmpTiles = 18;
 
-    // Pre-hash entity types so we don’t redo string hashing inside tight loops.
+    // Pre-hash entity types so we don't redo string hashing inside tight loops.
     private readonly entityTypeHash: Record<EntityType, number>;
 
-    constructor(seed: string) {
+    constructor(seed: string, islandConfig: IslandConfig = DEFAULT_ISLAND_CONFIG) {
         this._seed = seed;
         this.seedHash = hashStringToUint32(seed);
+        this.islandConfig = islandConfig;
 
         this.continentNoise = createSeededNoise2D(`${seed}::continent`);
         this.elevationDetailNoise = createSeededNoise2D(`${seed}::elev_detail`);
@@ -529,6 +571,8 @@ export default class WorldGenerator {
         this.riverNoise = createSeededNoise2D(`${seed}::river`);
         this.riverWarpNoiseX = createSeededNoise2D(`${seed}::river_warp_x`);
         this.riverWarpNoiseY = createSeededNoise2D(`${seed}::river_warp_y`);
+
+        this.coastlineNoise = createSeededNoise2D(`${seed}::coastline`);
 
         this.entityTypeHash = {
             CASTLE: hashStringToUint32("CASTLE"),
@@ -545,6 +589,105 @@ export default class WorldGenerator {
     }
 
     /**
+     * Get island distance factor (0 = center, 1 = edge, >1 = ocean)
+     * Creates a custom shape: wide at top (buildings), narrow at bottom (dock)
+     */
+    private getIslandDistanceFactor(tileX: number, tileY: number): number {
+        const cfg = this.islandConfig;
+        const halfHeight = cfg.height / 2;
+
+        // Relative position from center
+        const relX = tileX - cfg.centerX;
+        const relY = tileY - cfg.centerY;
+
+        // Normalize Y position (-1 at top, +1 at bottom)
+        const normalizedY = clamp01((relY + halfHeight) / cfg.height);
+
+        // Width varies from topWidth at top to bottomWidth at bottom
+        // Use a smooth curve for natural-looking shoreline
+        const widthAtY = cfg.topWidth * (1 - normalizedY) + cfg.bottomWidth * normalizedY;
+        const halfWidthAtY = widthAtY / 2;
+
+        // Calculate horizontal distance factor
+        const horizDist = Math.abs(relX) / halfWidthAtY;
+
+        // Calculate vertical distance factor
+        const vertDist = Math.abs(relY) / halfHeight;
+
+        // Combine into overall distance (inside island = < 1)
+        // Use smooth blend that respects the tapering shape
+        let dist: number;
+
+        if (relY < -halfHeight || relY > halfHeight) {
+            // Above or below the island
+            dist = 1.5;
+        } else if (Math.abs(relX) > halfWidthAtY) {
+            // Outside horizontal bounds at this Y level
+            dist = horizDist;
+        } else {
+            // Inside the island shape - use max of normalized distances
+            dist = Math.max(horizDist * 0.9, vertDist * 0.85);
+        }
+
+        // Add organic noise to coastline for natural look
+        const angle = Math.atan2(relY, relX);
+        const coastNoise = this.coastlineNoise(
+            Math.cos(angle) * 3 + tileX * 0.05,
+            Math.sin(angle) * 3 + tileY * 0.05
+        ) * 0.12;
+
+        dist += coastNoise;
+
+        return dist;
+    }
+
+    /**
+     * Check if tile is on a dirt path connecting buildings
+     * Creates T-shaped path: horizontal connecting buildings, vertical down to dock
+     */
+    private isOnPath(tileX: number, tileY: number): boolean {
+        const cfg = this.islandConfig;
+        const pathHalf = cfg.pathWidth;
+
+        // Building row Y position (in front of buildings)
+        const buildingY = cfg.buildings[0]?.y ?? -12;
+        const pathY = cfg.centerY + buildingY + 5; // Path slightly in front of buildings
+
+        // Get leftmost and rightmost building positions
+        const leftmost = Math.min(...cfg.buildings.map(b => b.x)) - 3;
+        const rightmost = Math.max(...cfg.buildings.map(b => b.x)) + 4;
+
+        // HORIZONTAL PATH: Connecting all three buildings
+        if (tileY >= pathY - pathHalf && tileY <= pathY + pathHalf) {
+            if (tileX >= cfg.centerX + leftmost && tileX <= cfg.centerX + rightmost) {
+                return true;
+            }
+        }
+
+        // VERTICAL PATH: From horizontal path down to dock
+        const dockPathX = cfg.centerX + cfg.dockX;
+        if (tileX >= dockPathX - pathHalf && tileX <= dockPathX + pathHalf) {
+            if (tileY >= pathY && tileY <= cfg.centerY + cfg.dockY + 2) {
+                return true;
+            }
+        }
+
+        // Small paths connecting each building to horizontal path
+        for (const building of cfg.buildings) {
+            const bx = cfg.centerX + building.x;
+            const by = cfg.centerY + building.y;
+            // Vertical connection from building to main path
+            if (tileX >= bx - 1 && tileX <= bx + 1) {
+                if (tileY >= by + 3 && tileY <= pathY + pathHalf) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Deterministic random float for any integer coordinate space (tile coords, chunk coords, etc.)
      * Returns a float in [0, 1).
      */
@@ -555,7 +698,13 @@ export default class WorldGenerator {
     }
 
     public getTerrainAtTile(tileX: number, tileY: number): TerrainTile {
-        // --- Continents / oceans (low frequency) ---
+        // --- ISLAND MODE ---
+        if (this.islandConfig.enabled) {
+            return this.getIslandTerrainAtTile(tileX, tileY);
+        }
+
+        // --- ORIGINAL INFINITE WORLD MODE ---
+        // Continents / oceans (low frequency)
         // We shape the continent value slightly so we get bigger swathes of ocean/land and fewer noisy coastlines.
         const c0 =
             (this.continentNoise(
@@ -745,5 +894,104 @@ export default class WorldGenerator {
         const extra = hashStringToUint32(salt);
         const h = hashCoords(this.seedHash, tileX, tileY, extra);
         return uint32ToUnitFloat(h);
+    }
+
+    /**
+     * Island mode terrain generation - creates a bounded island with:
+     * - Water surrounding the island
+     * - Sandy beaches along the edge
+     * - Grass interior with trees
+     * - Dirt paths connecting buildings
+     */
+    private getIslandTerrainAtTile(tileX: number, tileY: number): TerrainTile {
+        const cfg = this.islandConfig;
+        const distFactor = this.getIslandDistanceFactor(tileX, tileY);
+
+        // Beach zone thresholds (based on distance factor)
+        const beachStart = 0.75;  // Beach starts at 75% towards edge
+        const oceanStart = 0.95;  // Water starts at 95%
+
+        let type: TerrainType;
+        let isRiver = false;
+        let river01 = 0;
+
+        // Check if on path (dirt/sand colored)
+        const onPath = this.isOnPath(tileX, tileY);
+
+        // Check if near dock area (bottom of island)
+        const nearDock = Math.abs(tileX - cfg.centerX - cfg.dockX) < 4 &&
+                         tileY > cfg.centerY + cfg.dockY - 3 &&
+                         tileY < cfg.centerY + cfg.dockY + 5;
+
+        if (distFactor >= oceanStart && !nearDock) {
+            // Ocean - water surrounding island
+            type = "WATER";
+        } else if (nearDock && distFactor >= oceanStart) {
+            // Dock area extends slightly into water as sand/pier
+            type = "SAND";
+        } else if (distFactor >= beachStart || onPath) {
+            // Beach zone or dirt path
+            type = "SAND";
+        } else {
+            // Interior - mostly grass
+            // Add some variation with elevation noise
+            const elevNoise = (this.elevationDetailNoise(
+                tileX * this.elevationDetailScale,
+                tileY * this.elevationDetailScale
+            ) + 1) / 2;
+
+            // Small stone patches (rocks) scattered on grass
+            if (elevNoise > 0.88 && distFactor < 0.5) {
+                type = "STONE";
+            } else {
+                type = "GRASS";
+            }
+        }
+
+        const frame = TERRAIN_FRAMES[type];
+        const solid = type === "WATER";
+
+        // Elevation based on distance from center (higher in middle)
+        const elevation = clamp01(1 - distFactor);
+
+        // Moisture - higher near water/beach
+        const moisture = clamp01(distFactor > beachStart ? 0.8 : 0.5 + (1 - distFactor) * 0.3);
+
+        // Continent value (for compatibility)
+        const continent = distFactor < oceanStart ? 0.8 : 0;
+
+        // Forest density - grass areas away from paths and buildings
+        let forest01 = 0;
+        if (type === "GRASS" && !onPath) {
+            const patch = (this.forestPatchNoise(
+                tileX * this.forestScale,
+                tileY * this.forestScale
+            ) + 1) / 2;
+
+            // Less trees near buildings
+            const nearBuilding = cfg.buildings.some(b => {
+                const bx = cfg.centerX + b.x;
+                const by = cfg.centerY + b.y;
+                const dist = Math.sqrt((tileX - bx) ** 2 + (tileY - by) ** 2);
+                return dist < 10;
+            });
+
+            // Less trees near path
+            if (!nearBuilding && !onPath) {
+                forest01 = clamp01(patch * 0.6);
+            }
+        }
+
+        return {
+            type,
+            frame,
+            solid,
+            elevation,
+            moisture,
+            continent,
+            isRiver,
+            river01,
+            forest01,
+        };
     }
 }
