@@ -1,5 +1,5 @@
 const OPENROUTER_API_KEY = import.meta.env.VITE_OPENROUTER_API_KEY || '';
-const ELEVENLABS_API_KEY = '4ce9f14cb544a40a8280968bb058fc631738adb21098080ec1a3c75af0eca558';
+const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY || '';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
